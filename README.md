@@ -30,7 +30,7 @@ To reproduce the measured configuration, place these text files in the app data 
 | attention.txt | 1 |
 | output-rows.txt | 256 |
 
-On a physical Vita at 333 MHz, the measured configuration returned Tavi. and reached EOS in 136.381 seconds for a 67-token formatted ordering prompt. First token arrived at 92.575 seconds. The previous completed single-worker fused build took 718.256 seconds for the same tokens. The model can fail simple arithmetic and the benchmark covers one prompt.
+On a physical Vita at 500 MHz, the measured configuration returned Tavi. and reached EOS in 136.381 seconds for a 67-token formatted ordering prompt. First token arrived at 92.575 seconds. The previous completed single-worker fused build took 718.256 seconds for the same tokens. The model can fail simple arithmetic and the benchmark covers one prompt.
 
 Cross opens the keyboard, Triangle starts a new chat, and Circle cancels. Drag the front touchscreen in the conversation area, or hold Up or Down, to scroll through the full chat. At the bottom, the view follows new text as it arrives.
 
