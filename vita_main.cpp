@@ -17,6 +17,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <utility>
 
 int _newlib_heap_size_user=80*1024*1024;
 static const char* root="ux0:data/VitaDesk/MeteorLLM";
@@ -26,6 +27,9 @@ struct Lock{Lock(){sceKernelLockMutex(mutex_id,1,nullptr);}~Lock(){sceKernelUnlo
 enum Phase{Loading,Ready,Reading,Generating,Failed};
 static Phase phase=Loading;
 static std::string pending,question,answer,message="Loading the local model",history;
+struct Turn { std::string question, answer; };
+static std::vector<Turn> completed_turns;
+static uint64_t transcript_revision=0;
 static bool clear_requested=false;
 static uint64_t generation_started=0;
 static FILE* log_file=nullptr;
@@ -59,7 +63,7 @@ static int worker(SceSize,void*){
   {Lock lock;phase=Ready;message="Ready when you are";pending=read_request();}
   for(;;){
    std::string input,prior;
-   {Lock lock;if(clear_requested){history.clear();question.clear();answer.clear();clear_requested=false;}if(!pending.empty()){input=pending;pending.clear();prior=history;question=input;answer.clear();phase=Reading;message="Reading your question";generation_started=sceKernelGetProcessTimeWide();}}
+   {Lock lock;if(clear_requested){history.clear();question.clear();answer.clear();completed_turns.clear();++transcript_revision;clear_requested=false;}if(!pending.empty()){input=pending;pending.clear();prior=history;if(!question.empty())completed_turns.push_back({question,answer});question=input;answer.clear();++transcript_revision;phase=Reading;message="Reading your question";generation_started=sceKernelGetProcessTimeWide();}}
    if(input.empty()){sceKernelDelayThread(20000);continue;}
    stop_requested=false;log_text("PROMPT",input);std::string response;
    try{
@@ -78,7 +82,7 @@ static int worker(SceSize,void*){
     while(!stop_requested&&scores&&pos<engine.config().context&&generated<128){
      int next=choose(*scores,rng);if(next==engine.config().eos||next==151643){eos=true;break;}
      response+=tokenizer.decode(next);generated++;if(!first_token)first_token=sceKernelGetProcessTimeWide();
-     {Lock lock;answer=response;}
+     {Lock lock;answer=response;++transcript_revision;}
      log_text("TOKEN",std::to_string(next));if(pos+1>=engine.config().context||generated==128)break;scores=&engine.forward(next,pos++);sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
     }
     uint64_t finished=sceKernelGetProcessTimeWide();log_text("ANSWER",response);log_text("METRICS","prompt_tokens="+std::to_string(ids.size())+" generated="+std::to_string(generated)+" eos="+std::to_string(eos)+" stopped="+std::to_string(bool(stop_requested))+" elapsed_us="+std::to_string(finished-generation_started)+" first_token_us="+std::to_string(first_token?first_token-generation_started:0)+" embedding_read_bytes="+std::to_string(engine.embedding_read_bytes)+" output_read_us="+std::to_string(engine.output_read_us)+" output_compute_us="+std::to_string(engine.output_compute_us)+" "+engine.stage_metrics());
@@ -100,18 +104,56 @@ int main(){
  vita2d_set_clear_color(RGBA8(8,12,22,255));vita2d_pgf*font=vita2d_load_default_pgf();if(!font)return 3;
  SceUID thread=sceKernelCreateThread("meteor_inference",worker,0x10000100,256*1024,0,0,nullptr);if(thread<0||sceKernelStartThread(thread,0,nullptr)<0){Lock lock;phase=Failed;message="Could not start the model worker";}
  uint32_t last=0;bool ime=false;SceWChar16 input[1025]={0},empty[1]={0};static const SceWChar16 title[]={'A','s','k',' ','M','e','t','e','o','r','L','L','M',0};
- std::string shown_q,shown_a;std::vector<std::string>qlines,alines;int scroll=0;
+ struct ChatLine { std::string text; bool label; };
+ std::vector<ChatLine> lines;
+ constexpr int visible_lines=15;
+ uint64_t seen_revision=0,next_scroll=0;
+ int scroll=0,last_direction=0;
+ bool follow_latest=true;
  const unsigned amber=RGBA8(255,177,105,255),light=RGBA8(236,239,247,255),muted=RGBA8(147,160,182,255),panel=RGBA8(17,24,39,255);
  for(;;){
-  Phase state;std::string q,a,status;uint64_t started;
-  {Lock lock;state=phase;q=question;a=answer;status=message;started=generation_started;}
-  if(q!=shown_q){shown_q=q;qlines=wrap(font,q,836);scroll=0;}if(a!=shown_a){shown_a=a;alines=wrap(font,a,836);scroll=std::max(0,int(alines.size())-7);}
+  Phase state;
+  std::string status;
+  uint64_t started;
+  std::vector<Turn> snapshot;
+  bool changed=false;
+  {
+   Lock lock;
+   state=phase;status=message;started=generation_started;
+   if(seen_revision!=transcript_revision){
+    seen_revision=transcript_revision;
+    snapshot=completed_turns;
+    if(!question.empty())snapshot.push_back({question,answer});
+    changed=true;
+   }
+  }
+  if(changed){
+   lines.clear();
+   for(const auto& turn:snapshot){
+    if(!lines.empty())lines.push_back({"",false});
+    lines.push_back({"YOU",true});
+    for(auto& line:wrap(font,turn.question,836))lines.push_back({std::move(line),false});
+    if(!turn.answer.empty()){
+     lines.push_back({"METEOR",true});
+     for(auto& line:wrap(font,turn.answer,836))lines.push_back({std::move(line),false});
+    }
+   }
+   if(lines.empty()){scroll=0;follow_latest=true;}
+  }
+  const int max_scroll=std::max(0,int(lines.size())-visible_lines);
+  scroll=follow_latest?max_scroll:std::min(scroll,max_scroll);
   SceCtrlData pad{};sceCtrlPeekBufferPositive(0,&pad,1);uint32_t pressed=pad.buttons&~last;last=pad.buttons;
   if(!ime){
    if((pressed&SCE_CTRL_CIRCLE)&&(state==Reading||state==Generating))stop_requested=true;
    if((pressed&SCE_CTRL_TRIANGLE)&&state==Ready){Lock lock;clear_requested=true;message="New chat";}
-   if(pressed&SCE_CTRL_UP)scroll=std::max(0,scroll-1);
-   if(pressed&SCE_CTRL_DOWN)scroll=std::min(std::max(0,int(alines.size())-7),scroll+1);
+   const int direction=((pad.buttons&SCE_CTRL_DOWN)!=0)-((pad.buttons&SCE_CTRL_UP)!=0);
+   const auto now=sceKernelGetProcessTimeWide();
+   if(direction&&(direction!=last_direction||now>=next_scroll)){
+    scroll=std::clamp(scroll+direction,0,max_scroll);
+    follow_latest=scroll==max_scroll;
+    next_scroll=now+(direction==last_direction?70000:300000);
+   }
+   last_direction=direction;
    if((pressed&SCE_CTRL_CROSS)&&state==Ready){SceImeDialogParam param;sceImeDialogParamInit(&param);param.supportedLanguages=SCE_IME_LANGUAGE_ENGLISH;param.type=SCE_IME_TYPE_BASIC_LATIN;param.title=title;param.maxTextLength=1024;param.initialText=empty;param.inputTextBuffer=input;param.dialogMode=SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;if(sceImeDialogInit(&param)>=0)ime=true;}
   }else if(sceImeDialogGetStatus()==SCE_COMMON_DIALOG_STATUS_FINISHED){SceImeDialogResult result{};sceImeDialogGetResult(&result);sceImeDialogTerm();ime=false;if(result.button==SCE_IME_DIALOG_BUTTON_ENTER){std::string text=utf8(input);if(!text.empty()){Lock lock;pending=text;}}}
   vita2d_start_drawing();vita2d_clear_screen();
@@ -121,16 +163,21 @@ int main(){
   vita2d_pgf_draw_text(font,84,57,light,1.5f,"MeteorLLM");vita2d_pgf_draw_text(font,85,79,muted,.65f,"OFFLINE INTELLIGENCE");
   vita2d_draw_rectangle(786,29,145,37,panel);vita2d_draw_fill_circle(804,47,3,amber);vita2d_pgf_draw_text(font,818,53,amber,.8f,"ON DEVICE");
   vita2d_draw_line(28,96,932,96,RGBA8(37,47,66,255));
-  if(q.empty()){
+  if(lines.empty()){
    vita2d_pgf_draw_text(font,54,188,light,1.4f,"A little more space to think.");
    vita2d_pgf_draw_text(font,54,229,muted,1.0f,"Ask a question, explore an idea, or write something new.");
    vita2d_pgf_draw_text(font,54,260,muted,1.0f,"Everything runs right here on your Vita.");
    vita2d_draw_line(754,190,842,286,RGBA8(55,39,43,255));vita2d_draw_line(774,190,854,279,RGBA8(118,68,48,255));vita2d_draw_fill_circle(860,286,10,amber);
   }else{
-   vita2d_draw_rectangle(28,114,904,112,panel);vita2d_pgf_draw_text(font,48,139,amber,.7f,"YOU");for(int i=0;i<std::min(3,int(qlines.size()));i++)vita2d_pgf_draw_text(font,48,166+24*i,light,1.0f,qlines[i].c_str());
-   vita2d_draw_rectangle(28,242,904,234,panel);vita2d_pgf_draw_text(font,48,268,amber,.7f,"METEOR");
-   for(int i=0;i<7&&scroll+i<int(alines.size());i++)vita2d_pgf_draw_text(font,48,297+24*i,light,1.0f,alines[scroll+i].c_str());
-   if(alines.empty())vita2d_pgf_draw_text(font,48,307,muted,1.0f,state==Reading?"Reading your question...":state==Generating?"Thinking locally...":"");
+   vita2d_draw_rectangle(28,110,904,366,panel);
+   for(int i=0;i<visible_lines&&scroll+i<int(lines.size());i++){
+    const auto& line=lines[scroll+i];
+    vita2d_pgf_draw_text(font,48,135+23*i,line.label?amber:light,line.label?.75f:1.0f,line.text.c_str());
+   }
+   if(max_scroll){
+    const float thumb=std::max(14.f,350.f*visible_lines/lines.size());
+    vita2d_draw_rectangle(918,118+(350-thumb)*scroll/max_scroll,4,thumb,muted);
+   }
   }
   std::string bottom=status;if((state==Reading||state==Generating)&&started){uint64_t sec=(sceKernelGetProcessTimeWide()-started)/1000000;char time[32];std::snprintf(time,sizeof(time),"  %llu:%02llu",static_cast<unsigned long long>(sec/60),static_cast<unsigned long long>(sec%60));bottom+=time;}
   vita2d_pgf_draw_text(font,30,501,state==Failed?RGBA8(255,120,112,255):muted,.8f,bottom.c_str());
