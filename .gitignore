@@ -1,0 +1,7 @@
+/build*/
+/model/
+*.bin
+*.gguf
+*.vpk
+*.log
+__pycache__/
