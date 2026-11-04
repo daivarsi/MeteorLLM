@@ -2,6 +2,7 @@
 #include "tokenizer.h"
 #include <vita2d.h>
 #include <psp2/ctrl.h>
+#include <psp2/touch.h>
 #include <psp2/display.h>
 #include <psp2/ime_dialog.h>
 #include <psp2/kernel/processmgr.h>
@@ -103,6 +104,12 @@ int main(){
  if(vita2d_init()<0)return 2;
  vita2d_set_clear_color(RGBA8(8,12,22,255));vita2d_pgf*font=vita2d_load_default_pgf();if(!font)return 3;
  SceUID thread=sceKernelCreateThread("meteor_inference",worker,0x10000100,256*1024,0,0,nullptr);if(thread<0||sceKernelStartThread(thread,0,nullptr)<0){Lock lock;phase=Failed;message="Could not start the model worker";}
+ SceTouchPanelInfo touch_panel{};
+ const bool touch_enabled=sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT,&touch_panel)>=0
+  && touch_panel.maxDispY>touch_panel.minDispY
+  && sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT,SCE_TOUCH_SAMPLING_STATE_START)>=0;
+ int touch_id=-1;
+ float touch_y=0,drag_pixels=0;
  uint32_t last=0;bool ime=false;SceWChar16 input[1025]={0},empty[1]={0};static const SceWChar16 title[]={'A','s','k',' ','M','e','t','e','o','r','L','L','M',0};
  struct ChatLine { std::string text; bool label; };
  std::vector<ChatLine> lines;
@@ -154,7 +161,30 @@ int main(){
     next_scroll=now+(direction==last_direction?70000:300000);
    }
    last_direction=direction;
-   if((pressed&SCE_CTRL_CROSS)&&state==Ready){SceImeDialogParam param;sceImeDialogParamInit(&param);param.supportedLanguages=SCE_IME_LANGUAGE_ENGLISH;param.type=SCE_IME_TYPE_BASIC_LATIN;param.title=title;param.maxTextLength=1024;param.initialText=empty;param.inputTextBuffer=input;param.dialogMode=SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;if(sceImeDialogInit(&param)>=0)ime=true;}
+   SceTouchData touch{};
+   if(touch_enabled&&sceTouchPeek(SCE_TOUCH_PORT_FRONT,&touch,1)>0&&touch.reportNum==1){
+    const auto& finger=touch.report[0];
+    const float y=544.f*(finger.y-touch_panel.minDispY)/(touch_panel.maxDispY-touch_panel.minDispY);
+    if(touch_id==finger.id){
+     drag_pixels+=touch_y-y;
+     const int rows=int(drag_pixels/23.f);
+     if(rows){
+      scroll=std::clamp(scroll+rows,0,max_scroll);
+      follow_latest=scroll==max_scroll;
+      drag_pixels-=rows*23.f;
+     }
+     touch_y=y;
+    }else if(touch_id<0&&y>=110&&y<476){
+     touch_id=finger.id;
+     touch_y=y;
+     drag_pixels=0;
+    }else{
+     touch_id=-1;
+    }
+   }else{
+    touch_id=-1;
+   }
+   if((pressed&SCE_CTRL_CROSS)&&state==Ready){SceImeDialogParam param;sceImeDialogParamInit(&param);param.supportedLanguages=SCE_IME_LANGUAGE_ENGLISH;param.type=SCE_IME_TYPE_BASIC_LATIN;param.title=title;param.maxTextLength=1024;param.initialText=empty;param.inputTextBuffer=input;param.dialogMode=SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;if(sceImeDialogInit(&param)>=0){ime=true;touch_id=-1;}}
   }else if(sceImeDialogGetStatus()==SCE_COMMON_DIALOG_STATUS_FINISHED){SceImeDialogResult result{};sceImeDialogGetResult(&result);sceImeDialogTerm();ime=false;if(result.button==SCE_IME_DIALOG_BUTTON_ENTER){std::string text=utf8(input);if(!text.empty()){Lock lock;pending=text;}}}
   vita2d_start_drawing();vita2d_clear_screen();
   // Native meteor mark: warm nucleus and three tapering trails.
@@ -181,7 +211,7 @@ int main(){
   }
   std::string bottom=status;if((state==Reading||state==Generating)&&started){uint64_t sec=(sceKernelGetProcessTimeWide()-started)/1000000;char time[32];std::snprintf(time,sizeof(time),"  %llu:%02llu",static_cast<unsigned long long>(sec/60),static_cast<unsigned long long>(sec%60));bottom+=time;}
   vita2d_pgf_draw_text(font,30,501,state==Failed?RGBA8(255,120,112,255):muted,.8f,bottom.c_str());
-  vita2d_pgf_draw_text(font,30,531,light,.75f,"X  Ask     Triangle  New chat     Circle  Stop");vita2d_pgf_draw_text(font,754,531,muted,.7f,"Up / Down  Scroll");
+  vita2d_pgf_draw_text(font,30,531,light,.75f,"X  Ask     Triangle  New chat     Circle  Stop");vita2d_pgf_draw_text(font,695,531,muted,.7f,"Drag or Up / Down  Scroll");
   vita2d_end_drawing();vita2d_common_dialog_update();vita2d_swap_buffers();sceDisplayWaitVblankStart();
  }
 }
