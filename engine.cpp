@@ -304,7 +304,8 @@ const std::vector<float>& Engine::forward_batch(const std::vector<int>& tokens,i
   }
 #ifdef __ARM_NEON
   std::vector<Q4InputTile> tiles;
-  if(w.type==12&&count==8){
+  const auto lane_dot=w.type==12?q4_dot_lane8:q6_dot_lane8;
+  if((w.type==12||w.type==14)&&count==8){
    tiles.resize(w.cols/32);
    for(size_t g=0;g<tiles.size();g++)for(int t=0;t<8;t++){
     const auto& a=packed[g*8+t];
@@ -322,7 +323,7 @@ const std::vector<float>& Engine::forward_batch(const std::vector<int>& tokens,i
 #ifdef __ARM_NEON
     if(!tiles.empty()){
      float result[8];
-     q4_dot_lane8(w.data+r*stride,tiles.data(),result,w.cols);
+     lane_dot(w.data+r*stride,tiles.data(),result,w.cols);
      for(int t=0;t<8;t++)(states[t].*output)[r]=result[t];
      continue;
     }

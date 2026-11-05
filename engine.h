@@ -32,6 +32,7 @@ struct Q4InputTile {
  int8_t lanes[32][8];
  float scale[8],sum[8];
 };
+void q6_dot_lane8(const void*,const Q4InputTile*,float*,int);
 void q4_dot_lane8(const void*,const Q4InputTile*,float*,int);
 #endif
 struct Tensor { std::string name; uint32_t type=0,cols=0,rows=0; uint64_t offset=0,bytes=0; const uint8_t* data=nullptr; };

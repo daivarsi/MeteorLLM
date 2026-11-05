@@ -54,7 +54,7 @@ static int choose(const std::vector<float>&logits,std::mt19937&rng){
 static std::string read_request(){FILE*f=std::fopen((std::string(root)+"/request.txt").c_str(),"rb");if(!f)return {};char b[4097];size_t n=std::fread(b,1,4096,f);std::fclose(f);return std::string(b,n);}
 static int worker(SceSize,void*){
  try{
-  log_file=std::fopen((std::string(root)+"/run.log").c_str(),"w");log_text("APP","MeteorLLM v0.2.0");
+  log_file=std::fopen((std::string(root)+"/run.log").c_str(),"w");log_text("APP","MeteorLLM Q6 lane trial");
   uint64_t load_start=sceKernelGetProcessTimeWide();vitaqwen::Engine engine;vitaqwen::Tokenizer tokenizer;engine.load(root);tokenizer.load(std::string(root)+"/tokenizer.bin");engine.cancelled=[](){return bool(stop_requested);};
   if(FILE* full=std::fopen((std::string(root)+"/output-full.txt").c_str(),"r")){
    std::fclose(full);

@@ -333,6 +333,16 @@ void q6_activation_dot(const void* weights,const ActivationBlock* input,float* o
 
 #ifdef __ARM_NEON
 // Each SIMD lane owns one token. Two partial sums keep products within int16.
+static int16x8_t q4_dot_eight(const int8_t (*lanes)[8],int8x8_t weight){
+ auto product=vmull_s8(vld1_s8(lanes[0]),vdup_lane_s8(weight,0));
+ product=vmlal_s8(product,vld1_s8(lanes[1]),vdup_lane_s8(weight,1));
+ product=vmlal_s8(product,vld1_s8(lanes[2]),vdup_lane_s8(weight,2));
+ product=vmlal_s8(product,vld1_s8(lanes[3]),vdup_lane_s8(weight,3));
+ product=vmlal_s8(product,vld1_s8(lanes[4]),vdup_lane_s8(weight,4));
+ product=vmlal_s8(product,vld1_s8(lanes[5]),vdup_lane_s8(weight,5));
+ product=vmlal_s8(product,vld1_s8(lanes[6]),vdup_lane_s8(weight,6));
+ return vmlal_s8(product,vld1_s8(lanes[7]),vdup_lane_s8(weight,7));
+}
 void q4_dot_lane8(const void* weights,const Q4InputTile* input,float* out,int count){
  const auto* row=static_cast<const Q4*>(weights);
  float32x4_t total0=vdupq_n_f32(0),total1=vdupq_n_f32(0);
@@ -343,12 +353,14 @@ void q4_dot_lane8(const void* weights,const Q4InputTile* input,float* out,int co
    scale_min(group,row[block].scales,sc,m);
    const auto& tile=input[block*8+group];
    const auto* packed=row[block].qs+(group/2)*32;
-   int16x8_t dot0=vdupq_n_s16(0),dot1=vdupq_n_s16(0);
-   const int shift=(group%2)*4;
-   for(int k=0;k<16;k++){
-    dot0=vmlal_s8(dot0,vld1_s8(tile.lanes[k]),vdup_n_s8((packed[k]>>shift)&15));
-    dot1=vmlal_s8(dot1,vld1_s8(tile.lanes[k+16]),vdup_n_s8((packed[k+16]>>shift)&15));
-   }
+   const auto unpack=[&](int k){
+    const auto raw=vld1_u8(packed+k);
+    return vreinterpret_s8_u8(group%2?vshr_n_u8(raw,4):vand_u8(raw,vdup_n_u8(15)));
+   };
+   const auto dot0=vaddq_s16(q4_dot_eight(tile.lanes,unpack(0)),
+                            q4_dot_eight(tile.lanes+8,unpack(8)));
+   const auto dot1=vaddq_s16(q4_dot_eight(tile.lanes+16,unpack(16)),
+                            q4_dot_eight(tile.lanes+24,unpack(24)));
    const auto sum0=vaddl_s16(vget_low_s16(dot0),vget_low_s16(dot1));
    const auto sum1=vaddl_s16(vget_high_s16(dot0),vget_high_s16(dot1));
    const float d=scale*sc,bias=offset*m;
@@ -360,6 +372,40 @@ void q4_dot_lane8(const void* weights,const Q4InputTile* input,float* out,int co
  }
  vst1q_f32(out,total0);
  vst1q_f32(out+4,total1);
+}
+void q6_dot_lane8(const void* weights,const Q4InputTile* input,float* out,int count){
+ const auto* row=static_cast<const Q6*>(weights);
+ float32x4_t lo=vdupq_n_f32(0),hi=vdupq_n_f32(0);
+ for(int block=0;block<count/256;block++){
+  const float scale=half_to_float(row[block].d);
+  for(int half=0;half<2;half++)for(int group=0;group<4;group++){
+   const auto* low=row[block].ql+half*64+(group%2)*32;
+   const auto* high=row[block].qh+half*32;
+   const auto& tile=input[block*8+half*4+group];
+   const auto unpack=[&](int k){
+    auto l=vld1_u8(low+k);
+    l=group>=2?vshr_n_u8(l,4):vand_u8(l,vdup_n_u8(15));
+    auto h=vshl_u8(vld1_u8(high+k),vdup_n_s8(-2*group));
+    h=vshl_n_u8(vand_u8(h,vdup_n_u8(3)),4);
+    return vsub_s8(vreinterpret_s8_u8(vorr_u8(l,h)),vdup_n_s8(32));
+   };
+   // Widen each eight-product partial before adding to avoid signed overflow.
+   const auto a=q4_dot_eight(tile.lanes,unpack(0));
+   const auto b=q4_dot_eight(tile.lanes+8,unpack(8));
+   const auto c=q4_dot_eight(tile.lanes+16,unpack(16));
+   const auto d=q4_dot_eight(tile.lanes+24,unpack(24));
+   const float d0=scale*row[block].scales[half*8+group*2];
+   const float d1=scale*row[block].scales[half*8+group*2+1];
+   const auto l=vaddq_f32(vmulq_n_f32(vcvtq_f32_s32(vaddl_s16(vget_low_s16(a),vget_low_s16(b))),d0),
+                          vmulq_n_f32(vcvtq_f32_s32(vaddl_s16(vget_low_s16(c),vget_low_s16(d))),d1));
+   const auto h=vaddq_f32(vmulq_n_f32(vcvtq_f32_s32(vaddl_s16(vget_high_s16(a),vget_high_s16(b))),d0),
+                          vmulq_n_f32(vcvtq_f32_s32(vaddl_s16(vget_high_s16(c),vget_high_s16(d))),d1));
+   lo=vaddq_f32(lo,vmulq_f32(l,vld1q_f32(tile.scale)));
+   hi=vaddq_f32(hi,vmulq_f32(h,vld1q_f32(tile.scale+4)));
+  }
+ }
+ vst1q_f32(out,lo);
+ vst1q_f32(out+4,hi);
 }
 #endif
 
