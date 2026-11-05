@@ -1,3 +1,4 @@
+#include <algorithm>
 // Q4_K/Q6_K layouts and dequantization adapted from ggml, pinned at 19e8a86fe.
 // Copyright (c) 2023-2026 The ggml authors. MIT license: licenses/llama.cpp-LICENSE.
 #include "engine.h"
@@ -210,5 +211,156 @@ void quantized_dot_batch(const void*data,uint32_t type,const float* const*input,
  for(int i=0;i<batch;i++)out[i]=quantized_dot(data,type,input[i],count);
 #endif
 }
+
+// Quantize each input group once, outside the matrix row loop.
+void quantize_activation(const float* input,ActivationBlock* blocks,int count,int batch){
+ for(int offset=0;offset<count;offset+=32){
+  auto& block=blocks[(offset/32)*batch];
+  float peak=0;
+  for(int i=0;i<32;i++)peak=std::max(peak,std::fabs(input[offset+i]));
+  block.scale=peak/127.f;
+  const float inverse=block.scale>0?1.f/block.scale:0.f;
+  block.sum=0;
+  for(int i=0;i<32;i++){
+   const int value=int(std::round(input[offset+i]*inverse));
+   block.values[i]=int8_t(value);
+   block.sum+=value;
+  }
+ }
+}
+template<int Fixed> static void q4_activation_dot_tile(const void* weights,const ActivationBlock* input,float* out,int count,int width){
+ const int batch=Fixed?Fixed:width;
+ const auto* row=static_cast<const Q4*>(weights);
+ float totals[16]={};
+ for(int b=0;b<count/256;b++){
+  const float scale=half_to_float(row[b].d),bias=half_to_float(row[b].dmin);
+  for(int group=0;group<8;group++){
+   uint8_t sc,m;
+   scale_min(group,row[b].scales,sc,m);
+   const auto* packed=row[b].qs+(group/2)*32;
+   const auto* activation=input+(b*8+group)*batch;
+   const float d=scale*sc,min=bias*m;
+#ifdef __ARM_NEON
+   uint8x16_t lo=vld1q_u8(packed),hi=vld1q_u8(packed+16);
+   if(group%2){lo=vshrq_n_u8(lo,4);hi=vshrq_n_u8(hi,4);}
+   else{lo=vandq_u8(lo,vdupq_n_u8(15));hi=vandq_u8(hi,vdupq_n_u8(15));}
+   const int8x16_t q0=vreinterpretq_s8_u8(lo),q1=vreinterpretq_s8_u8(hi);
+   #pragma GCC unroll 8
+   for(int t=0;t<batch;t++){
+    const auto& a=activation[t];
+    const int8x16_t a0=vld1q_s8(a.values),a1=vld1q_s8(a.values+16);
+    int16x8_t products=vmull_s8(vget_low_s8(q0),vget_low_s8(a0));
+    products=vmlal_s8(products,vget_high_s8(q0),vget_high_s8(a0));
+    products=vmlal_s8(products,vget_low_s8(q1),vget_low_s8(a1));
+    products=vmlal_s8(products,vget_high_s8(q1),vget_high_s8(a1));
+    const int32x4_t sums=vpaddlq_s16(products);
+    int32x2_t pair=vadd_s32(vget_low_s32(sums),vget_high_s32(sums));
+    pair=vpadd_s32(pair,pair);
+    totals[t]+=a.scale*(d*vget_lane_s32(pair,0)-min*a.sum);
+   }
+#else
+   #pragma GCC unroll 8
+   for(int t=0;t<batch;t++){
+    const auto& a=activation[t];
+    int dot=0;
+    for(int i=0;i<32;i++)dot+=((packed[i]>>((group%2)*4))&15)*a.values[i];
+    totals[t]+=a.scale*(d*dot-min*a.sum);
+   }
+#endif
+  }
+ }
+ std::copy_n(totals,batch,out);
+}
+void q4_activation_dot(const void* weights,const ActivationBlock* input,float* out,int count,int batch){
+ if(batch==8)q4_activation_dot_tile<8>(weights,input,out,count,batch);
+ else q4_activation_dot_tile<0>(weights,input,out,count,batch);
+}
+
+template<int Fixed> static void q6_activation_dot_tile(const void* weights,const ActivationBlock* input,float* out,int count,int width){
+ const int batch=Fixed?Fixed:width;
+ const auto* row=static_cast<const Q6*>(weights);
+ float totals[16]={};
+ for(int b=0;b<count/256;b++){
+  const float scale=half_to_float(row[b].d);
+  for(int half=0;half<2;half++)for(int group=0;group<4;group++){
+   const auto* low=row[b].ql+half*64+(group%2)*32;
+   const auto* high=row[b].qh+half*32;
+   const auto* activation=input+(b*8+half*4+group)*batch;
+   const float d0=scale*row[b].scales[half*8+group*2];
+   const float d1=scale*row[b].scales[half*8+group*2+1];
+#ifdef __ARM_NEON
+   const auto unpack=[&](int offset){
+    uint8x16_t l=vld1q_u8(low+offset),h=vld1q_u8(high+offset);
+    l=group>=2?vshrq_n_u8(l,4):vandq_u8(l,vdupq_n_u8(15));
+    h=vshlq_u8(h,vdupq_n_s8(-2*group));
+    h=vshlq_n_u8(vandq_u8(h,vdupq_n_u8(3)),4);
+    return vsubq_s8(vreinterpretq_s8_u8(vorrq_u8(l,h)),vdupq_n_s8(32));
+   };
+   const auto q0=unpack(0),q1=unpack(16);
+   const auto dot16=[](int8x16_t q,int8x16_t a){
+    auto product=vmull_s8(vget_low_s8(q),vget_low_s8(a));
+    product=vmlal_s8(product,vget_high_s8(q),vget_high_s8(a));
+    const auto sums=vpaddlq_s16(product);
+    auto pair=vadd_s32(vget_low_s32(sums),vget_high_s32(sums));
+    pair=vpadd_s32(pair,pair);
+    return vget_lane_s32(pair,0);
+   };
+   #pragma GCC unroll 8
+   for(int t=0;t<batch;t++){
+    const auto& a=activation[t];
+    totals[t]+=a.scale*(d0*dot16(q0,vld1q_s8(a.values))+d1*dot16(q1,vld1q_s8(a.values+16)));
+   }
+#else
+   #pragma GCC unroll 8
+   for(int t=0;t<batch;t++){
+    const auto& a=activation[t];
+    int dot[2]={0,0};
+    for(int k=0;k<32;k++){
+     const int q=((low[k]>>(group>=2?4:0))&15)|(((high[k]>>(2*group))&3)<<4);
+     dot[k/16]+=(q-32)*a.values[k];
+    }
+    totals[t]+=a.scale*(d0*dot[0]+d1*dot[1]);
+   }
+#endif
+  }
+ }
+ std::copy_n(totals,batch,out);
+}
+void q6_activation_dot(const void* weights,const ActivationBlock* input,float* out,int count,int batch){
+ if(batch==8)q6_activation_dot_tile<8>(weights,input,out,count,batch);
+ else q6_activation_dot_tile<0>(weights,input,out,count,batch);
+}
+
+#ifdef __ARM_NEON
+// Each SIMD lane owns one token. Two partial sums keep products within int16.
+void q4_dot_lane8(const void* weights,const Q4InputTile* input,float* out,int count){
+ const auto* row=static_cast<const Q4*>(weights);
+ float32x4_t total0=vdupq_n_f32(0),total1=vdupq_n_f32(0);
+ for(int block=0;block<count/256;block++){
+  const float scale=half_to_float(row[block].d),offset=half_to_float(row[block].dmin);
+  for(int group=0;group<8;group++){
+   uint8_t sc,m;
+   scale_min(group,row[block].scales,sc,m);
+   const auto& tile=input[block*8+group];
+   const auto* packed=row[block].qs+(group/2)*32;
+   int16x8_t dot0=vdupq_n_s16(0),dot1=vdupq_n_s16(0);
+   const int shift=(group%2)*4;
+   for(int k=0;k<16;k++){
+    dot0=vmlal_s8(dot0,vld1_s8(tile.lanes[k]),vdup_n_s8((packed[k]>>shift)&15));
+    dot1=vmlal_s8(dot1,vld1_s8(tile.lanes[k+16]),vdup_n_s8((packed[k+16]>>shift)&15));
+   }
+   const auto sum0=vaddl_s16(vget_low_s16(dot0),vget_low_s16(dot1));
+   const auto sum1=vaddl_s16(vget_high_s16(dot0),vget_high_s16(dot1));
+   const float d=scale*sc,bias=offset*m;
+   const auto a0=vsubq_f32(vmulq_n_f32(vcvtq_f32_s32(sum0),d),vmulq_n_f32(vld1q_f32(tile.sum),bias));
+   const auto a1=vsubq_f32(vmulq_n_f32(vcvtq_f32_s32(sum1),d),vmulq_n_f32(vld1q_f32(tile.sum+4),bias));
+   total0=vaddq_f32(total0,vmulq_f32(a0,vld1q_f32(tile.scale)));
+   total1=vaddq_f32(total1,vmulq_f32(a1,vld1q_f32(tile.scale+4)));
+  }
+ }
+ vst1q_f32(out,total0);
+ vst1q_f32(out+4,total1);
+}
+#endif
 
 }

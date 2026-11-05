@@ -19,19 +19,43 @@ void dequantize_scalar(const void *data, uint32_t type, float *out, int count);
 void dequantize(const void *data, uint32_t type, float *out, int count);
 float quantized_dot(const void *data,uint32_t type,const float *input,int count);
 void quantized_dot_batch(const void*,uint32_t,const float* const*,float*,int,int);
+struct ActivationBlock {
+ int8_t values[32];
+ float scale;
+ int sum;
+};
+void quantize_activation(const float* input,ActivationBlock* blocks,int count,int batch);
+void q4_activation_dot(const void* weights,const ActivationBlock* input,float* out,int count,int batch);
+void q6_activation_dot(const void* weights,const ActivationBlock* input,float* out,int count,int batch);
+#ifdef __ARM_NEON
+struct Q4InputTile {
+ int8_t lanes[32][8];
+ float scale[8],sum[8];
+};
+void q4_dot_lane8(const void*,const Q4InputTile*,float*,int);
+#endif
 struct Tensor { std::string name; uint32_t type=0,cols=0,rows=0; uint64_t offset=0,bytes=0; const uint8_t* data=nullptr; };
 struct Config { int dim=0,ff=0,layers=0,heads=0,kv_heads=0,head=0,vocab=0,context=0,eos=0;float eps=0,theta=0; };
 class Engine {
 public:
+    // Keep every integer position exactly representable by the float RoPE path.
+    static constexpr int position_limit=1<<24;
     Engine()=default;~Engine();
     Engine(const Engine&)=delete;Engine& operator=(const Engine&)=delete;
     void load(const std::string& directory);
+    // Reset before reusing the engine after an interrupted forward pass.
     void reset();
+    void reset_metrics();
+    void save_prefix();
+    void restore_prefix();
+    size_t kv_bytes() const{return (keys.capacity()+values.capacity())*sizeof(uint16_t);}
     size_t validate_quant_kernels() const;
     void set_workers(int n);
     void set_batch_kernel(int n);
     void set_parallel_attention(bool enabled){parallel_attention=enabled;}
     void set_output_rows(int n);
+    bool fast_output=true;
+    int output_full_scans=0;
     void benchmark_extended(const std::function<void(const std::string&)>& report);
     void validate_extended(const std::function<void(const std::string&)>& report);
     void benchmark_output(const std::function<void(const std::string&)>& report);
@@ -62,11 +86,15 @@ private:
     std::vector<float> scratch[3],attention_scores[3];
     bool parallel_attention=false;
     uint8_t* model=nullptr;uint64_t model_bytes=0;int mem_uid=-1;
-    FILE* emb_file=nullptr;Tensor emb;
+    FILE* emb_file=nullptr;
+    FILE* q4_output_file=nullptr;
+    Tensor emb;
     std::vector<Tensor> tensors;
-    std::vector<uint16_t> keys,values;
+    std::vector<uint16_t> keys,values,prefix_keys,prefix_values;
+    int prefix_length=0;
     std::vector<float> x,xb,tmp,q,k,v,attention,gate,up,scores,logits,row;
     std::vector<uint8_t> io;
+    std::vector<ActivationBlock> decode_activation;
     int next_position=0;
 };
 }

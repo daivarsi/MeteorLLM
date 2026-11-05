@@ -28,7 +28,7 @@ int main(int argc,char**argv){
   std::vector<int>order(scores->size());std::iota(order.begin(),order.end(),0);std::partial_sort(order.begin(),order.begin()+10,order.end(),[&](int a,int b){return (*scores)[a]>(*scores)[b];});
   std::cout<<"TOP";for(int i=0;i<10;i++)std::cout<<" "<<order[i]<<":"<<(*scores)[order[i]];std::cout<<"\nGENERATED";
   int limit=argc>4?std::stoi(argv[4]):1;
-  for(int n=0;n<limit&&pos<engine.config().context;n++){int next=std::max_element(scores->begin(),scores->end())-scores->begin();std::cout<<" "<<next;std::cout.flush();if(next==engine.config().eos)break;if(n+1<limit)scores=&engine.forward(next,pos++);}
+  for(int n=0;n<limit;n++){int next=std::max_element(scores->begin(),scores->end())-scores->begin();std::cout<<" "<<next;std::cout.flush();if(next==engine.config().eos||next==151643)break;if(n+1<limit)scores=&engine.forward(next,pos++);}
   std::cout<<"\nresident_bytes="<<engine.resident_bytes()<<" embedding_read_bytes="<<engine.embedding_read_bytes<<" "+engine.stage_metrics()+" total_seconds="<<std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()<<"\n";
  }catch(const std::exception&e){std::cerr<<"ERROR "<<e.what()<<"\n";return 1;}
 }

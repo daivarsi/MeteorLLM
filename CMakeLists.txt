@@ -10,7 +10,7 @@ vita_create_self(eboot.bin meteor UNSAFE)
 # Use explicit file dependencies as well as target ordering. The SDK VPK
 # helper in this pinned SDK does not quote resource paths containing spaces.
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/param.sfo"
- COMMAND "${VITA_MKSFOEX}" -s APP_VER=00.03 -s TITLE_ID=METEOR001 MeteorLLM "${CMAKE_CURRENT_BINARY_DIR}/param.sfo"
+ COMMAND "${VITA_MKSFOEX}" -s APP_VER=00.05 -s TITLE_ID=METEOR001 MeteorLLM "${CMAKE_CURRENT_BINARY_DIR}/param.sfo"
  DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/eboot.bin" VERBATIM)
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/MeteorLLM.vpk"
  COMMAND "${VITA_PACK_VPK}" -a "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon0.png=sce_sys/icon0.png" -s "${CMAKE_CURRENT_BINARY_DIR}/param.sfo" -b "${CMAKE_CURRENT_BINARY_DIR}/eboot.bin" "${CMAKE_CURRENT_BINARY_DIR}/MeteorLLM.vpk"

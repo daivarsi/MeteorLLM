@@ -34,7 +34,7 @@ static float dot(const float*a,const float*b,int n){
  float s=0;for(int i=0;i<n;i++)s+=a[i]*b[i];return s;
 #endif
 }
-Engine::~Engine(){if(emb_file)std::fclose(emb_file);
+Engine::~Engine(){if(q4_output_file)std::fclose(q4_output_file);if(emb_file)std::fclose(emb_file);
 #ifdef __vita__
  if(mem_uid>=0)sceKernelFreeMemBlock(mem_uid);
 #else
@@ -86,6 +86,11 @@ void Engine::load(const std::string&dir){
   shape(b+"ffn_gate.weight",cfg.dim,cfg.ff);shape(b+"ffn_up.weight",cfg.dim,cfg.ff);shape(b+"ffn_down.weight",cfg.ff,cfg.dim);
  }
  emb_file=std::fopen((dir+"/embedding.bin").c_str(),"rb");require(emb_file,"embedding open failed");require(std::fseek(emb_file,0,SEEK_END)==0&&uint64_t(std::ftell(emb_file))==emb.bytes,"embedding size mismatch");
+ q4_output_file=std::fopen((dir+"/output-q4-test.bin").c_str(),"rb");
+ if(q4_output_file){
+  const uint64_t expected=uint64_t(cfg.vocab)*(cfg.dim/256)*144;
+  require(std::fseek(q4_output_file,0,SEEK_END)==0&&uint64_t(std::ftell(q4_output_file))==expected,"Q4 output size mismatch");
+ }
  int qdim=cfg.heads*cfg.head,kdim=cfg.kv_heads*cfg.head;
  size_t nk=size_t(cfg.layers)*cfg.context*kdim;require(nk<=64*1024*1024,"KV allocation bound");keys.resize(nk);values.resize(nk);
  x.resize(cfg.dim);xb.resize(cfg.dim);tmp.resize(cfg.dim);q.resize(qdim);k.resize(kdim);v.resize(kdim);attention.resize(qdim);gate.resize(cfg.ff);up.resize(cfg.ff);scores.resize(cfg.context);logits.resize(cfg.vocab);row.resize(std::max({cfg.dim,cfg.ff,qdim}));io.resize(size_t(emb.bytes/emb.rows)*64);for(auto& s:scratch)s.resize(row.size());for(auto& s:attention_scores)s.resize(cfg.context);reset();
@@ -110,7 +115,35 @@ size_t Engine::validate_quant_kernels()const{
   }
  }return checked;
 }
-void Engine::reset(){next_position=0;embedding_read_bytes=0;output_read_us=output_compute_us=0;matrix_us=norm_us=rope_us=attention_us=activation_us=0;/* Future KV slots cannot be read by causal attention. */}
+void Engine::reset(){
+ // A new sequence only attends to slots written since this reset.
+ next_position=0;reset_metrics();
+}
+void Engine::save_prefix(){
+ require(next_position>0&&next_position<=cfg.context,"invalid prefix length");
+ prefix_length=next_position;
+ const size_t width=cfg.kv_heads*cfg.head;
+ const size_t count=size_t(prefix_length)*width;
+ prefix_keys.resize(cfg.layers*count);
+ prefix_values.resize(cfg.layers*count);
+ for(int layer=0;layer<cfg.layers;layer++){
+  const size_t source=size_t(layer)*cfg.context*width;
+  std::copy_n(keys.data()+source,count,prefix_keys.data()+layer*count);
+  std::copy_n(values.data()+source,count,prefix_values.data()+layer*count);
+ }
+}
+void Engine::restore_prefix(){
+ require(prefix_length>0,"missing prefix");
+ const size_t width=cfg.kv_heads*cfg.head;
+ const size_t count=size_t(prefix_length)*width;
+ for(int layer=0;layer<cfg.layers;layer++){
+  const size_t destination=size_t(layer)*cfg.context*width;
+  std::copy_n(prefix_keys.data()+layer*count,count,keys.data()+destination);
+  std::copy_n(prefix_values.data()+layer*count,count,values.data()+destination);
+ }
+ next_position=prefix_length;
+}
+void Engine::reset_metrics(){output_full_scans=0;embedding_read_bytes=0;output_read_us=output_compute_us=0;matrix_us=norm_us=rope_us=attention_us=activation_us=0;}
 void Engine::set_batch_kernel(int n){require(n>=0&&n<=2,"invalid batch kernel");batch_kernel=n;}
 void Engine::set_output_rows(int n){require(n>=64&&n<=1024,"invalid output chunk size");output_rows=n;if(emb.rows)io.resize(size_t(emb.bytes/emb.rows)*n);}
 std::string Engine::stage_metrics()const{return "matrix_us="+std::to_string(matrix_us)+" norm_us="+std::to_string(norm_us)+" rope_us="+std::to_string(rope_us)+" attention_us="+std::to_string(attention_us)+" activation_us="+std::to_string(activation_us);}
@@ -118,7 +151,18 @@ void Engine::set_workers(int n){require(n>=1&&n<=3,"invalid worker count");worke
 void Engine::matvec(const Tensor&t,const float*in,float*out){
  auto stage_start=now_us();require(t.data,"resident matvec expected");size_t stride=t.bytes/t.rows;
  if(cancelled&&cancelled())throw std::runtime_error("Stopped");
+ const bool use_int8=t.type==12||t.type==14;
+ const auto integer_dot=t.type==12?q4_activation_dot:q6_activation_dot;
+ if(use_int8){
+  decode_activation.resize(t.cols/32);
+  quantize_activation(in,decode_activation.data(),t.cols,1);
+ }
  pool.run(worker_count,t.rows,[&](int begin,int end,[[maybe_unused]] int worker){
+  if(use_int8){
+   for(int r=begin;r<end;r++)
+    integer_dot(t.data+r*stride,decode_activation.data(),out+r,t.cols,1);
+   return;
+  }
   for(int r=begin;r<end;r++){
 #ifdef __ARM_NEON
    out[r]=quantized_dot(t.data+r*stride,t.type,in,t.cols);
@@ -152,9 +196,21 @@ void Engine::norm(float*out,const float*in,const Tensor&w,int n){
 }
 void Engine::embedding(int token,float*out){size_t stride=emb.bytes/emb.rows;require(std::fseek(emb_file,long(uint64_t(token)*stride),SEEK_SET)==0,"embedding seek failed");require(std::fread(io.data(),1,stride,emb_file)==stride,"embedding short read");embedding_read_bytes+=stride;dequantize(io.data(),emb.type,out,cfg.dim);}
 void Engine::output_head(const float*in){
- size_t stride=emb.bytes/emb.rows;require(std::fseek(emb_file,0,SEEK_SET)==0,"output seek failed");
- for(int base=0;base<cfg.vocab;base+=output_rows){if(cancelled&&cancelled())throw std::runtime_error("Stopped");int nr=std::min(output_rows,cfg.vocab-base);size_t bytes=stride*nr;auto read_start=now_us();require(std::fread(io.data(),1,bytes,emb_file)==bytes,"output short read");output_read_us+=now_us()-read_start;embedding_read_bytes+=bytes;auto compute_start=now_us();
+ FILE* file=q4_output_file?q4_output_file:emb_file;
+ const size_t stride=q4_output_file?size_t(cfg.dim/256)*144:emb.bytes/emb.rows;
+ require(std::fseek(file,0,SEEK_SET)==0,"output seek failed");
+ if(q4_output_file){
+  decode_activation.resize(cfg.dim/32);
+  quantize_activation(in,decode_activation.data(),cfg.dim,1);
+ }
+ const auto project=[&](int first,int end){
+ require(std::fseek(file,long(size_t(first)*stride),SEEK_SET)==0,"output range seek failed");
+ for(int base=first;base<end;base+=output_rows){if(cancelled&&cancelled())throw std::runtime_error("Stopped");int nr=std::min(output_rows,end-base);size_t bytes=stride*nr;auto read_start=now_us();require(std::fread(io.data(),1,bytes,file)==bytes,"output short read");output_read_us+=now_us()-read_start;embedding_read_bytes+=bytes;auto compute_start=now_us();
   pool.run(worker_count,nr,[&](int begin,int end,[[maybe_unused]] int worker){for(int r=begin;r<end;r++){
+ if(q4_output_file){
+  q4_activation_dot(io.data()+r*stride,decode_activation.data(),logits.data()+base+r,cfg.dim,1);
+  continue;
+ }
 #ifdef __ARM_NEON
  logits[base+r]=quantized_dot(io.data()+r*stride,emb.type,in,cfg.dim);
 #else
@@ -162,16 +218,42 @@ void Engine::output_head(const float*in){
 #endif
  }});output_compute_us+=now_us()-compute_start;
  }
+ };
+ // This fast path is specific to the Qwen3 vocabulary layout.
+ constexpr int prefix=24576, tail=151643;
+ if(!fast_output||!q4_output_file||cfg.vocab!=151936||cfg.eos!=151645){
+  project(0,cfg.vocab);
+  ++output_full_scans;
+  return;
+ }
+ std::fill(logits.begin()+prefix,logits.begin()+tail,-1e30f);
+ project(0,prefix);
+ project(tail,cfg.vocab);
+ float top=-1e30f,runner_up=-1e30f;
+ for(float score:logits){
+  if(score>top){runner_up=top;top=score;}
+  else if(score>runner_up)runner_up=score;
+ }
+ if(top-runner_up<1.f){
+  project(prefix,tail);
+  ++output_full_scans;
+ }
+
 }
 void Engine::attend(const float*query,float*result,int layer,int position){
- const int kd=cfg.kv_heads*cfg.head;const size_t cachebase=size_t(layer)*cfg.context*kd;
+ const int kd=cfg.kv_heads*cfg.head;
+ const size_t cachebase=size_t(layer)*cfg.context*kd;
+ // Visit the ring oldest first, including across the physical wrap.
+ const int count=std::min(position+1,cfg.context);
+ const int oldest=position<cfg.context?0:(position+1)%cfg.context;
+ const int first_count=std::min(count,cfg.context-oldest);
  std::atomic<bool> valid{true};
  pool.run(parallel_attention?worker_count:1,cfg.heads,[&](int first,int last,int worker){auto&scores=attention_scores[worker];
   for(int h=first;h<last;h++){
    int kh=h/(cfg.heads/cfg.kv_heads);float mx=-std::numeric_limits<float>::infinity();
-   for(int p=0;p<=position;p++){float sum=0;size_t at=cachebase+size_t(p)*kd+kh*cfg.head;for(int i=0;i<cfg.head;i++)sum+=query[h*cfg.head+i]*half_to_float(keys[at+i]);scores[p]=sum/std::sqrt(float(cfg.head));mx=std::max(mx,scores[p]);}
-   float sum=0;for(int p=0;p<=position;p++){scores[p]=std::exp(scores[p]-mx);sum+=scores[p];}if(!std::isfinite(sum)||sum<=0){valid.store(false,std::memory_order_relaxed);continue;}for(int p=0;p<=position;p++)scores[p]/=sum;
-   for(int i=0;i<cfg.head;i++){float a=0;for(int p=0;p<=position;p++)a+=scores[p]*half_to_float(values[cachebase+size_t(p)*kd+kh*cfg.head+i]);result[h*cfg.head+i]=a;}
+   for(int p=0,slot=oldest;p<count;p++,slot++){if(slot==cfg.context)slot=0;float sum=0;size_t at=cachebase+size_t(slot)*kd+kh*cfg.head;for(int i=0;i<cfg.head;i++)sum+=query[h*cfg.head+i]*half_to_float(keys[at+i]);scores[p]=sum/std::sqrt(float(cfg.head));mx=std::max(mx,scores[p]);}
+   float sum=0;for(int p=0;p<count;p++){scores[p]=std::exp(scores[p]-mx);sum+=scores[p];}if(!std::isfinite(sum)||sum<=0){valid.store(false,std::memory_order_relaxed);continue;}for(int p=0;p<count;p++)scores[p]/=sum;
+   for(int i=0;i<cfg.head;i++){float a=0;const auto* value=values.data()+cachebase+kh*cfg.head+i;for(int p=0;p<first_count;p++)a+=scores[p]*half_to_float(value[size_t(oldest+p)*kd]);for(int p=first_count;p<count;p++)a+=scores[p]*half_to_float(value[size_t(p-first_count)*kd]);result[h*cfg.head+i]=a;}
   }
  });
  require(valid.load(std::memory_order_relaxed),"invalid attention scores");
@@ -182,7 +264,7 @@ void Engine::rope(float*data,int heads,int position){auto stage_start=now_us();
 }
 const std::vector<float>& Engine::forward(int token,int position,bool output){
  if(progress)progress(position,-1,"start");
- require(model&&token>=0&&token<cfg.vocab&&position==next_position&&position<cfg.context,"invalid forward position/token");embedding(token,x.data());int kd=cfg.kv_heads*cfg.head;
+ require(model&&token>=0&&token<cfg.vocab&&position==next_position&&position<position_limit,"invalid forward position/token");embedding(token,x.data());int kd=cfg.kv_heads*cfg.head;
  for(int l=0;l<cfg.layers;l++){
   if(cancelled&&cancelled())throw std::runtime_error("Stopped");
   std::string b="blk."+std::to_string(l)+".";norm(xb.data(),x.data(),tensor(b+"attn_norm.weight"),cfg.dim);
@@ -192,7 +274,8 @@ const std::vector<float>& Engine::forward(int token,int position,bool output){
   for(int h=0;h<cfg.kv_heads;h++)norm(k.data()+h*cfg.head,k.data()+h*cfg.head,tensor(b+"attn_k_norm.weight"),cfg.head);
   rope(q.data(),cfg.heads,position);rope(k.data(),cfg.kv_heads,position);
   auto attention_start=now_us();size_t cachebase=size_t(l)*cfg.context*kd;
-  for(int i=0;i<kd;i++){keys[cachebase+size_t(position)*kd+i]=float_to_half(k[i]);values[cachebase+size_t(position)*kd+i]=float_to_half(v[i]);}
+  const size_t slot=cachebase+size_t(position%cfg.context)*kd;
+  for(int i=0;i<kd;i++){keys[slot+i]=float_to_half(k[i]);values[slot+i]=float_to_half(v[i]);}
   attend(q.data(),attention.data(),l,position);
   attention_us+=now_us()-attention_start;
   if(progress&&position==0&&l==0)progress(position,l,"attention");
@@ -205,7 +288,7 @@ const std::vector<float>& Engine::forward(int token,int position,bool output){
 
 const std::vector<float>& Engine::forward_batch(const std::vector<int>& tokens,int position,bool output){
  require(!tokens.empty()&&tokens.size()<=16,"batch size must be 1..16");
- require(model&&position==next_position&&position>=0&&position+int(tokens.size())<=cfg.context,"invalid batch position");
+ require(model&&position==next_position&&position>=0&&position<=position_limit-int(tokens.size()),"invalid batch position");
  for(int token:tokens)require(token>=0&&token<cfg.vocab,"invalid batch token");
  if(tokens.size()==1)return forward(tokens[0],position,output);
  struct State{std::vector<float>x,xb,tmp,q,k,v,attention,gate,up;};
@@ -214,10 +297,42 @@ const std::vector<float>& Engine::forward_batch(const std::vector<int>& tokens,i
  auto matrix=[&](const Tensor&w,std::vector<float> State::*input,std::vector<float> State::*output){
   if(cancelled&&cancelled())throw std::runtime_error("Stopped");
   auto stage_start=now_us();size_t stride=w.bytes/w.rows;const float* inputs[16];for(int t=0;t<count;t++)inputs[t]=(states[t].*input).data();
+  std::vector<ActivationBlock> packed;
+  if(w.type==12||w.type==14){
+   packed.resize(size_t(w.cols/32)*count);
+   for(int t=0;t<count;t++)quantize_activation(inputs[t],packed.data()+t,w.cols,count);
+  }
+#ifdef __ARM_NEON
+  std::vector<Q4InputTile> tiles;
+  if(w.type==12&&count==8){
+   tiles.resize(w.cols/32);
+   for(size_t g=0;g<tiles.size();g++)for(int t=0;t<8;t++){
+    const auto& a=packed[g*8+t];
+    auto& tile=tiles[g];
+    tile.scale[t]=a.scale;
+    tile.sum[t]=float(a.sum);
+    for(int k=0;k<32;k++)tile.lanes[k][t]=a.values[k];
+   }
+  }
+#endif
+  const auto integer_dot=w.type==12?q4_activation_dot:q6_activation_dot;
   pool.run(worker_count,w.rows,[&](int begin,int end,[[maybe_unused]] int worker){
    float* decoded=scratch[worker].data();
    for(int r=begin;r<end;r++){
-    if(batch_kernel){int width=batch_kernel==1?4:8;float results[8];for(int base=0;base<count;base+=width){int n=std::min(width,count-base);quantized_dot_batch(w.data+r*stride,w.type,inputs+base,results,w.cols,n);for(int t=0;t<n;t++)(states[base+t].*output)[r]=results[t];}}
+#ifdef __ARM_NEON
+    if(!tiles.empty()){
+     float result[8];
+     q4_dot_lane8(w.data+r*stride,tiles.data(),result,w.cols);
+     for(int t=0;t<8;t++)(states[t].*output)[r]=result[t];
+     continue;
+    }
+#endif
+    if(!packed.empty()){
+     float result[16];
+     integer_dot(w.data+r*stride,packed.data(),result,w.cols,count);
+     for(int t=0;t<count;t++)(states[t].*output)[r]=result[t];
+    }
+    else if(batch_kernel){int width=batch_kernel==1?4:8;float results[8];for(int base=0;base<count;base+=width){int n=std::min(width,count-base);quantized_dot_batch(w.data+r*stride,w.type,inputs+base,results,w.cols,n);for(int t=0;t<n;t++)(states[base+t].*output)[r]=results[t];}}
     else{dequantize(w.data+r*stride,w.type,decoded,w.cols);for(int t=0;t<count;t++)(states[t].*output)[r]=dot(decoded,inputs[t],w.cols);}
    }
   });
@@ -233,7 +348,8 @@ const std::vector<float>& Engine::forward_batch(const std::vector<int>& tokens,i
   for(int h=0;h<cfg.kv_heads;h++)norm(k.data()+h*cfg.head,k.data()+h*cfg.head,tensor(b+"attn_k_norm.weight"),cfg.head);
   rope(q.data(),cfg.heads,position);rope(k.data(),cfg.kv_heads,position);
   auto attention_start=now_us();size_t cachebase=size_t(l)*cfg.context*kd;
-  for(int i=0;i<kd;i++){keys[cachebase+size_t(position)*kd+i]=float_to_half(k[i]);values[cachebase+size_t(position)*kd+i]=float_to_half(v[i]);}
+  const size_t slot=cachebase+size_t(position%cfg.context)*kd;
+  for(int i=0;i<kd;i++){keys[slot+i]=float_to_half(k[i]);values[slot+i]=float_to_half(v[i]);}
   attend(q.data(),attention.data(),l,position);
   attention_us+=now_us()-attention_start;
   }

@@ -8,6 +8,7 @@ public:
  void load(const std::string&path);
  std::vector<int> encode(const std::string&text)const;
  std::string decode(int token)const;
+ bool is_special(int token)const;
 private:
  void bpe(const std::string&text,size_t start,size_t end,std::vector<int>&out)const;
  int special_at(const std::string&,size_t,size_t&)const;

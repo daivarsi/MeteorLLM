@@ -18,6 +18,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <deque>
+#include <malloc.h>
 #include <utility>
 
 int _newlib_heap_size_user=80*1024*1024;
@@ -27,9 +29,15 @@ static std::atomic<bool> stop_requested{false};
 struct Lock{Lock(){sceKernelLockMutex(mutex_id,1,nullptr);}~Lock(){sceKernelUnlockMutex(mutex_id,1);}};
 enum Phase{Loading,Ready,Reading,Generating,Failed};
 static Phase phase=Loading;
-static std::string pending,question,answer,message="Loading the local model",history;
+static std::string pending,question,answer,message="Loading the local model";
 struct Turn { std::string question, answer; };
-static std::vector<Turn> completed_turns;
+static std::deque<Turn> completed_turns;
+static size_t completed_bytes=0;
+static constexpr size_t transcript_limit=128*1024;
+static constexpr size_t response_byte_limit=64*1024;
+static constexpr int safety_tokens=4096;
+static constexpr int response_limits[]={128,256,512,1024,0};
+static int response_mode=1;
 static uint64_t transcript_revision=0;
 static bool clear_requested=false;
 static uint64_t generation_started=0;
@@ -46,49 +54,189 @@ static int choose(const std::vector<float>&logits,std::mt19937&rng){
 static std::string read_request(){FILE*f=std::fopen((std::string(root)+"/request.txt").c_str(),"rb");if(!f)return {};char b[4097];size_t n=std::fread(b,1,4096,f);std::fclose(f);return std::string(b,n);}
 static int worker(SceSize,void*){
  try{
-  log_file=std::fopen((std::string(root)+"/run.log").c_str(),"w");log_text("APP","MeteorLLM offline prototype 00.01");
+  log_file=std::fopen((std::string(root)+"/run.log").c_str(),"w");log_text("APP","MeteorLLM v0.2.0");
   uint64_t load_start=sceKernelGetProcessTimeWide();vitaqwen::Engine engine;vitaqwen::Tokenizer tokenizer;engine.load(root);tokenizer.load(std::string(root)+"/tokenizer.bin");engine.cancelled=[](){return bool(stop_requested);};
+  if(FILE* full=std::fopen((std::string(root)+"/output-full.txt").c_str(),"r")){
+   std::fclose(full);
+   engine.fast_output=false;
+  }
   log_text("KERNEL_CHECK",std::to_string(engine.validate_quant_kernels())+" values; decode and dot products bit-exact against scalar");
   FILE* diagnostic=std::fopen((std::string(root)+"/matrix-test.txt").c_str(),"r");
   if(diagnostic){std::fclose(diagnostic);engine.benchmark_matrices([](const std::string&s){log_text("MATRIX_TEST",s);});log_text("MATRIX_TEST_DONE","passed");}
   FILE* batch_diagnostic=std::fopen((std::string(root)+"/batch-test.txt").c_str(),"r");if(batch_diagnostic){std::fclose(batch_diagnostic);engine.validate_batch([](const std::string&s){log_text("BATCH_TEST",s);});log_text("BATCH_TEST_DONE","passed");}
   FILE* attention_test=std::fopen((std::string(root)+"/attention-test.txt").c_str(),"r");if(attention_test){std::fclose(attention_test);engine.validate_extended([](const std::string&s){log_text("ATTENTION_CHECK",s);});log_text("ATTENTION_DONE","passed");}
-  int attention_mode=0;FILE* attention_config=std::fopen((std::string(root)+"/attention.txt").c_str(),"r");if(attention_config){if(std::fscanf(attention_config,"%d",&attention_mode)!=1)attention_mode=0;std::fclose(attention_config);}if(attention_mode<0||attention_mode>1)throw std::runtime_error("invalid attention mode");engine.set_parallel_attention(attention_mode!=0);log_text("PARALLEL_ATTENTION",std::to_string(attention_mode));
+  int attention_mode=1;FILE* attention_config=std::fopen((std::string(root)+"/attention.txt").c_str(),"r");if(attention_config){if(std::fscanf(attention_config,"%d",&attention_mode)!=1)attention_mode=0;std::fclose(attention_config);}if(attention_mode<0||attention_mode>1)throw std::runtime_error("invalid attention mode");engine.set_parallel_attention(attention_mode!=0);log_text("PARALLEL_ATTENTION",std::to_string(attention_mode));
   FILE* extended=std::fopen((std::string(root)+"/extended-test.txt").c_str(),"r");if(extended){std::fclose(extended);engine.benchmark_extended([](const std::string&s){log_text("EXTENDED_KERNEL",s);});engine.validate_extended([](const std::string&s){log_text("EXTENDED_CHECK",s);});engine.benchmark_output([](const std::string&s){log_text("OUTPUT_TEST",s);});log_text("EXTENDED_DONE","passed");}
-  int kernel_mode=0;FILE* kernel_config=std::fopen((std::string(root)+"/kernel.txt").c_str(),"r");if(kernel_config){if(std::fscanf(kernel_config,"%d",&kernel_mode)!=1)kernel_mode=0;std::fclose(kernel_config);}engine.set_batch_kernel(kernel_mode);log_text("BATCH_KERNEL",std::to_string(kernel_mode));
-  int output_rows=64;FILE* output_config=std::fopen((std::string(root)+"/output-rows.txt").c_str(),"r");if(output_config){if(std::fscanf(output_config,"%d",&output_rows)!=1)output_rows=64;std::fclose(output_config);}engine.set_output_rows(output_rows);log_text("OUTPUT_ROWS",std::to_string(output_rows));
-  int batch_size=4;FILE* batch_config=std::fopen((std::string(root)+"/batch.txt").c_str(),"r");if(batch_config){if(std::fscanf(batch_config,"%d",&batch_size)!=1)batch_size=1;std::fclose(batch_config);}if(batch_size<1||batch_size>16)throw std::runtime_error("invalid batch size");log_text("BATCH_SIZE",std::to_string(batch_size));
+  int kernel_mode=2;FILE* kernel_config=std::fopen((std::string(root)+"/kernel.txt").c_str(),"r");if(kernel_config){if(std::fscanf(kernel_config,"%d",&kernel_mode)!=1)kernel_mode=0;std::fclose(kernel_config);}engine.set_batch_kernel(kernel_mode);log_text("BATCH_KERNEL",std::to_string(kernel_mode));
+  int output_rows=256;FILE* output_config=std::fopen((std::string(root)+"/output-rows.txt").c_str(),"r");if(output_config){if(std::fscanf(output_config,"%d",&output_rows)!=1)output_rows=64;std::fclose(output_config);}engine.set_output_rows(output_rows);log_text("OUTPUT_ROWS",std::to_string(output_rows));
+  int batch_size=8;FILE* batch_config=std::fopen((std::string(root)+"/batch.txt").c_str(),"r");if(batch_config){if(std::fscanf(batch_config,"%d",&batch_size)!=1)batch_size=1;std::fclose(batch_config);}if(batch_size<1||batch_size>16)throw std::runtime_error("invalid batch size");log_text("BATCH_SIZE",std::to_string(batch_size));
   int matrix_workers=3;FILE* config=std::fopen((std::string(root)+"/workers.txt").c_str(),"r");if(config){if(std::fscanf(config,"%d",&matrix_workers)!=1)matrix_workers=1;std::fclose(config);}engine.set_workers(matrix_workers);log_text("WORKERS",std::to_string(matrix_workers));
   SceKernelFreeMemorySizeInfo mem{};mem.size=sizeof(mem);sceKernelGetFreeMemorySize(&mem);
+  log_text("MEMORY","heap_in_use="+std::to_string(mallinfo().uordblks)+" kv_bytes="+std::to_string(engine.kv_bytes()));
   log_text("LOAD",std::to_string((sceKernelGetProcessTimeWide()-load_start)/1000)+" ms; resident="+std::to_string(engine.resident_bytes())+" free_user="+std::to_string(mem.size_user)+" cpu="+std::to_string(scePowerGetArmClockFrequency()));
+  const std::string system="<|im_start|>system\nYou are a helpful assistant. Follow the instructions and answer concisely. If you do not know, say so.<|im_end|>\n";
+  const auto prefix=tokenizer.encode(system+"<|im_start|>user\n");
+  bool cache_prefix=true;
+  if(FILE* cold=std::fopen((std::string(root)+"/prefix-cold.txt").c_str(),"r")){
+   std::fclose(cold);
+   cache_prefix=false;
+  }
+  if(cache_prefix){
+   {Lock lock;message="Preparing the chat template";}
+   const auto started=sceKernelGetProcessTimeWide();
+   for(int p=0;p<int(prefix.size());){
+    const int n=std::min(batch_size,int(prefix.size())-p);
+    engine.forward_batch(std::vector<int>(prefix.begin()+p,prefix.begin()+p+n),p,false);
+    p+=n;
+    sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
+   }
+   engine.save_prefix();
+   engine.reset();
+   log_text("PREFIX_INIT","tokens="+std::to_string(prefix.size())+" elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-started)+" heap_in_use="+std::to_string(mallinfo().uordblks));
+  }
   {Lock lock;phase=Ready;message="Ready when you are";pending=read_request();}
+  const auto turn_end=tokenizer.encode("<|im_end|>\n");
+  // Recent token IDs are kept for recovery if a cancelled pass partially
+  // overwrites the ring. The normal path feeds only the unprocessed suffix.
+  std::vector<int> recent;
+  size_t deferred=0;
+  int pos=0;
+  bool has_turn=false;
   for(;;){
-   std::string input,prior;
-   {Lock lock;if(clear_requested){history.clear();question.clear();answer.clear();completed_turns.clear();++transcript_revision;clear_requested=false;}if(!pending.empty()){input=pending;pending.clear();prior=history;if(!question.empty())completed_turns.push_back({question,answer});question=input;answer.clear();++transcript_revision;phase=Reading;message="Reading your question";generation_started=sceKernelGetProcessTimeWide();}}
+   std::string input;
+   int limit=0;
+   {
+    Lock lock;
+    if(clear_requested){
+     engine.reset();
+     recent.clear();
+     pos=0;
+     deferred=0;
+     has_turn=false;
+     question.clear();
+     answer.clear();
+     completed_turns.clear();
+     completed_bytes=0;
+     ++transcript_revision;
+     clear_requested=false;
+    }
+    if(!pending.empty()){
+     input=std::move(pending);
+     pending.clear();
+     if(!question.empty()){
+      completed_bytes+=question.size()+answer.size();
+      completed_turns.push_back({std::move(question),std::move(answer)});
+      while(completed_turns.size()>128||completed_bytes>transcript_limit){
+       completed_bytes-=completed_turns.front().question.size()+completed_turns.front().answer.size();
+       completed_turns.pop_front();
+      }
+     }
+     question=input;
+     answer.clear();
+     ++transcript_revision;
+     limit=response_limits[response_mode];
+     stop_requested=false;
+     phase=Reading;
+     message="Reading your question";
+     generation_started=sceKernelGetProcessTimeWide();
+    }
+   }
    if(input.empty()){sceKernelDelayThread(20000);continue;}
-   stop_requested=false;log_text("PROMPT",input);std::string response;
+   log_text("PROMPT",input);
+   std::vector<int> turn_ids;
+   bool prefilled=false;
+   auto finish_turn=[&]{
+    if(!prefilled)return;
+    prefilled=false;
+    recent.insert(recent.end(),turn_ids.begin(),turn_ids.end());
+    recent.insert(recent.end(),turn_end.begin(),turn_end.end());
+    if(recent.size()>size_t(engine.config().context))
+     recent.erase(recent.begin(),recent.end()-engine.config().context);
+    has_turn=true;
+   };
    try{
-    std::string prompt="<|im_start|>system\nYou are a helpful assistant. Follow the instructions and answer concisely. If you do not know, say so.<|im_end|>\n"+prior+"<|im_start|>user\n"+input+"<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-    auto ids=tokenizer.encode(prompt);if(ids.empty()||ids.size()+16>=size_t(engine.config().context))throw std::runtime_error("This conversation is full. Start a new chat.");
-    log_text("ENCODED",std::to_string(ids.size())+" tokens; elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-generation_started));
+    if(input.find("<|")!=std::string::npos)throw std::invalid_argument("Reserved chat marker in question");
+    turn_ids=tokenizer.encode((has_turn?std::string():system)+"<|im_start|>user\n"+input+"<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    std::vector<int> ids(recent.end()-deferred,recent.end());
+    size_t cached=0;
+    if(cache_prefix&&!has_turn&&deferred==0&&turn_ids.size()>prefix.size()&&
+       std::equal(prefix.begin(),prefix.end(),turn_ids.begin())){
+     engine.restore_prefix();
+     cached=prefix.size();
+     pos=int(cached);
+    }
+    ids.insert(ids.end(),turn_ids.begin()+cached,turn_ids.end());
+    if(pos>vitaqwen::Engine::position_limit-int(ids.size())-safety_tokens)
+     throw std::invalid_argument("Position safety limit reached. Start a new chat.");
+    engine.reset_metrics();
+    const int prefill_start=pos;
+    const int prefill_end=pos+int(ids.size());
+    log_text("ENCODED",std::to_string(ids.size())+" tokens; cached="+std::to_string(cached)+" start_position="+std::to_string(pos)+" elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-generation_started));
     engine.progress=[&](int token,int layer,const char*stage){
      if(token==0||layer==-1)log_text("PROGRESS","token="+std::to_string(token)+" layer="+std::to_string(layer)+" stage="+stage+" elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-generation_started));
-     if(layer>=0){Lock lock;message=(phase==Reading?"Reading "+std::to_string(token+1)+"/"+std::to_string(ids.size()):"Generating token "+std::to_string(token-int(ids.size())+2))+"  layer "+std::to_string(layer+1)+"/"+std::to_string(engine.config().layers);}
+     if(layer>=0){Lock lock;message=(phase==Reading?"Reading "+std::to_string(token-prefill_start+1)+"/"+std::to_string(ids.size()):"Generating token "+std::to_string(token-prefill_end+2))+"  layer "+std::to_string(layer+1)+"/"+std::to_string(engine.config().layers);}
      sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
     };
-    engine.reset();const std::vector<float>*scores=nullptr;int pos=0;
-    while(pos<int(ids.size())){if(stop_requested)break;int n=std::min(batch_size,int(ids.size())-pos);auto start=sceKernelGetProcessTimeWide();scores=&engine.forward_batch(std::vector<int>(ids.begin()+pos,ids.begin()+pos+n),pos,pos+n==int(ids.size()));pos+=n;log_text("PREFILL","position="+std::to_string(pos)+" batch="+std::to_string(n)+" elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-start)+" "+engine.stage_metrics());sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);}
-    std::mt19937 rng(1234);int generated=0;bool eos=false;uint64_t first_token=0;
-    if(!stop_requested){Lock lock;phase=Generating;message="Generating on your Vita";}
-    while(!stop_requested&&scores&&pos<engine.config().context&&generated<128){
-     int next=choose(*scores,rng);if(next==engine.config().eos||next==151643){eos=true;break;}
-     response+=tokenizer.decode(next);generated++;if(!first_token)first_token=sceKernelGetProcessTimeWide();
-     {Lock lock;answer=response;++transcript_revision;}
-     log_text("TOKEN",std::to_string(next));if(pos+1>=engine.config().context||generated==128)break;scores=&engine.forward(next,pos++);sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
+    const std::vector<float>* scores=nullptr;
+    for(int offset=0;offset<int(ids.size());){
+     int n=std::min(batch_size,int(ids.size())-offset);
+     auto start=sceKernelGetProcessTimeWide();
+     scores=&engine.forward_batch(std::vector<int>(ids.begin()+offset,ids.begin()+offset+n),pos,pos+n==prefill_end);
+     offset+=n;
+     pos+=n;
+     log_text("PREFILL","position="+std::to_string(pos)+" batch="+std::to_string(n)+" elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-start)+" "+engine.stage_metrics());
     }
-    uint64_t finished=sceKernelGetProcessTimeWide();log_text("ANSWER",response);log_text("METRICS","prompt_tokens="+std::to_string(ids.size())+" generated="+std::to_string(generated)+" eos="+std::to_string(eos)+" stopped="+std::to_string(bool(stop_requested))+" elapsed_us="+std::to_string(finished-generation_started)+" first_token_us="+std::to_string(first_token?first_token-generation_started:0)+" embedding_read_bytes="+std::to_string(engine.embedding_read_bytes)+" output_read_us="+std::to_string(engine.output_read_us)+" output_compute_us="+std::to_string(engine.output_compute_us)+" "+engine.stage_metrics());
-    {Lock lock;if(!response.empty())history=prior+"<|im_start|>user\n"+input+"<|im_end|>\n<|im_start|>assistant\n"+response+"<|im_end|>\n";phase=Ready;message=stop_requested?"Stopped":eos?"Ready when you are":"Response limit reached";}
-   }catch(const std::exception&e){log_text("GENERATION_ERROR",std::string(e.what())+" elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-generation_started));Lock lock;phase=Ready;message=e.what();}
+    prefilled=true;
+    std::mt19937 rng(1234);
+    std::string response;
+    const char* reason="Safety limit reached";
+    int generated=0;
+    uint64_t first_token=0;
+    const uint64_t prefill_finished=sceKernelGetProcessTimeWide();
+    {Lock lock;phase=Generating;message="Generating on your Vita";}
+    deferred=turn_end.size();
+    for(;;){
+     if(stop_requested){reason="Stopped";break;}
+     int next=choose(*scores,rng);
+     if(next==engine.config().eos||next==151643){reason="End of turn";break;}
+     if(tokenizer.is_special(next)){reason="Unexpected chat marker";break;}
+     std::string piece=tokenizer.decode(next);
+     if(response.size()+piece.size()>response_byte_limit)break;
+     response+=piece;
+     turn_ids.push_back(next);
+     ++generated;
+     ++deferred;
+     if(!first_token)first_token=sceKernelGetProcessTimeWide();
+     {Lock lock;answer=response;++transcript_revision;}
+     log_text("TOKEN",std::to_string(next));
+     if(limit&&generated==limit){reason="Response limit reached";break;}
+     if(generated==safety_tokens)break;
+     scores=&engine.forward(next,pos);
+     ++pos;
+     --deferred;
+    }
+    finish_turn();
+    const uint64_t finished=sceKernelGetProcessTimeWide();
+    SceKernelFreeMemorySizeInfo memory{};
+    memory.size=sizeof(memory);
+    const int memory_rc=sceKernelGetFreeMemorySize(&memory);
+    log_text("ANSWER",response);
+    log_text("METRICS","prompt_tokens="+std::to_string(ids.size()+cached)+" cached_tokens="+std::to_string(cached)+" generated="+std::to_string(generated)+" position="+std::to_string(pos)+" elapsed_us="+std::to_string(finished-generation_started)+" prefill_us="+std::to_string(prefill_finished-generation_started)+" decode_us="+std::to_string(finished-prefill_finished)+" first_token_us="+std::to_string(first_token?first_token-generation_started:0)+" heap_in_use="+std::to_string(mallinfo().uordblks)+" kv_bytes="+std::to_string(engine.kv_bytes())+" free_user="+std::to_string(memory_rc>=0?memory.size_user:0)+" embedding_read_bytes="+std::to_string(engine.embedding_read_bytes)+" output_read_us="+std::to_string(engine.output_read_us)+" output_compute_us="+std::to_string(engine.output_compute_us)+" output_full_scans="+std::to_string(engine.output_full_scans)+" "+engine.stage_metrics());
+    log_text("STOP",reason);
+    {Lock lock;phase=Ready;message=reason;}
+   }catch(const std::invalid_argument&e){
+    log_text("STOP",e.what());
+    Lock lock;phase=Ready;message=e.what();
+   }catch(const std::exception&e){
+    finish_turn();
+    engine.reset();
+    pos=0;
+    deferred=recent.size();
+    const bool stopped=stop_requested;
+    log_text(stopped?"STOP":"GENERATION_ERROR",e.what());
+    Lock lock;phase=Ready;message=stopped?"Stopped":"Inference error";
+   }
+   engine.progress={};
   }
  }catch(const std::exception&e){log_text("LOAD_ERROR",e.what());Lock lock;phase=Failed;message=e.what();}
  return 0;
@@ -122,14 +270,15 @@ int main(){
   Phase state;
   std::string status;
   uint64_t started;
+  int limit;
   std::vector<Turn> snapshot;
   bool changed=false;
   {
    Lock lock;
-   state=phase;status=message;started=generation_started;
+   state=phase;status=message;started=generation_started;limit=response_limits[response_mode];
    if(seen_revision!=transcript_revision){
     seen_revision=transcript_revision;
-    snapshot=completed_turns;
+    snapshot.assign(completed_turns.begin(),completed_turns.end());
     if(!question.empty())snapshot.push_back({question,answer});
     changed=true;
    }
@@ -151,6 +300,10 @@ int main(){
   scroll=follow_latest?max_scroll:std::min(scroll,max_scroll);
   SceCtrlData pad{};sceCtrlPeekBufferPositive(0,&pad,1);uint32_t pressed=pad.buttons&~last;last=pad.buttons;
   if(!ime){
+   if((pressed&SCE_CTRL_SQUARE)&&state==Ready){
+    Lock lock;
+    response_mode=(response_mode+1)%(sizeof(response_limits)/sizeof(response_limits[0]));
+   }
    if((pressed&SCE_CTRL_CIRCLE)&&(state==Reading||state==Generating))stop_requested=true;
    if((pressed&SCE_CTRL_TRIANGLE)&&state==Ready){Lock lock;clear_requested=true;message="New chat";}
    const int direction=((pad.buttons&SCE_CTRL_DOWN)!=0)-((pad.buttons&SCE_CTRL_UP)!=0);
@@ -211,6 +364,8 @@ int main(){
   }
   std::string bottom=status;if((state==Reading||state==Generating)&&started){uint64_t sec=(sceKernelGetProcessTimeWide()-started)/1000000;char time[32];std::snprintf(time,sizeof(time),"  %llu:%02llu",static_cast<unsigned long long>(sec/60),static_cast<unsigned long long>(sec%60));bottom+=time;}
   vita2d_pgf_draw_text(font,30,501,state==Failed?RGBA8(255,120,112,255):muted,.8f,bottom.c_str());
+  const std::string limit_label=limit?"Square: "+std::to_string(limit)+" tokens":"Square: Until EOS (4096 max)";
+  vita2d_pgf_draw_text(font,650,501,muted,.8f,limit_label.c_str());
   vita2d_pgf_draw_text(font,30,531,light,.75f,"X  Ask     Triangle  New chat     Circle  Stop");vita2d_pgf_draw_text(font,695,531,muted,.7f,"Drag or Up / Down  Scroll");
   vita2d_end_drawing();vita2d_common_dialog_update();vita2d_swap_buffers();sceDisplayWaitVblankStart();
  }

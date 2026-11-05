@@ -48,6 +48,11 @@ void Tokenizer::load(const std::string&path){
  uint64_t previous=0;for(uint32_t i=0;i<merge_count;i++){const uint8_t*p=data.data()+merge_base+16*i;uint32_t a=read32(p),b=read32(p+4),to=read32(p+8),rank=read32(p+12);uint64_t key=(uint64_t(a)<<32)|b;check(a<count&&b<count&&to<count&&rank<merge_count&&(!i||key>previous),"invalid merge entry");previous=key;}
 }
 std::string Tokenizer::decode(int token)const{check(token>=0&&uint32_t(token)<count,"decode token bounds");uint32_t a=read32(data.data()+offset_base+4*token),b=read32(data.data()+offset_base+4*(token+1));return std::string(reinterpret_cast<const char*>(data.data()+blob_base+a),b-a);}
+bool Tokenizer::is_special(int token)const{
+ for(uint32_t i=0;i<special_count;i++)
+  if(int(read32(data.data()+special_base+4*i))==token)return true;
+ return false;
+}
 int Tokenizer::special_at(const std::string&s,size_t p,size_t&len)const{int found=-1;len=0;for(uint32_t i=0;i<special_count;i++){int id=read32(data.data()+special_base+4*i);std::string text=decode(id);if(text.size()>len&&s.compare(p,text.size(),text)==0){found=id;len=text.size();}}return found;}
 void Tokenizer::bpe(const std::string&s,size_t start,size_t end,std::vector<int>&out)const{
  std::vector<uint32_t>ids;for(size_t p=start;p<end;p++)ids.push_back(read32(data.data()+byte_base+4*uint8_t(s[p])));
