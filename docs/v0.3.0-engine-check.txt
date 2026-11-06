@@ -1,0 +1,5 @@
+BATCH workers1/3 prefill max_abs=0
+BATCH workers1/3 continuation max_abs=0
+PREFIX restore full logits bit_exact=1
+OUTPUT_CACHE full logits bit_exact=1
+CANCEL reset recovery passed

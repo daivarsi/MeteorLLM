@@ -1,0 +1,4 @@
+{"case":"tavi","prompt":"Mira is older than Soren. Soren is older than Tavi. Who is youngest? Answer with only the name.","text":"Tavi","finish_reason":"stop","generated":3,"cached_tokens":32,"output_full_scans":1}
+{"case":"lang_whales","prompt":"Are whales fish? Answer in one sentence and explain the main distinction.","text":"No, whales are mammals, not fish, because they are born fully developed with lungs and have a different body plan compared to fish.","finish_reason":"stop","generated":28,"cached_tokens":32,"output_full_scans":10}
+{"case":"lang_translation","prompt":"Translate into Spanish, returning only the translation: The door is open.","text":"La puerta está abierta.","finish_reason":"stop","generated":7,"cached_tokens":32,"output_full_scans":3}
+{"case":"confirm_bats","prompt":"Are bats birds? Explain in one sentence.","text":"No, bats are mammals, not birds.","finish_reason":"stop","generated":10,"cached_tokens":32,"output_full_scans":2}

@@ -14,7 +14,7 @@ def value(t):
 assert f.read(4)==b'GGUF' and u('I')==3
 nt,nm=u('Q'),u('Q');meta={}
 for _ in range(nm):k=string();meta[k]=value(u('I'))
-assert meta['general.architecture']=='qwen3'
+assert meta['general.architecture']=='qwen35'
 tensors=[]
 for _ in range(nt):
  name=string();shape=[u('Q') for _ in range(u('I'))];typ=u('I');offset=u('Q')
@@ -22,15 +22,19 @@ for _ in range(nt):
  size=math.prod(shape)*4 if typ==0 else math.prod(shape)//256*{12:144,14:210}[typ]
  tensors.append(dict(name=name,shape=shape,type=typ,source_offset=offset,size=size))
 align=meta.get('general.alignment',32);base=(f.tell()+align-1)//align*align
+tensors=[t for t in tensors if not t['name'].startswith('blk.24.')]
+nt=len(tensors)
 header_size=(128+nt*96+255)//256*256;cursor=header_size
 for t in tensors:
  if t['name']=='token_embd.weight':t['offset']=2**64-1
  else:t['offset']=cursor;cursor+=t['size']
-h=bytearray(128);h[:8]=b'VQWN0001'
+h=bytearray(128);h[:8]=b'VQ350001'
 keys=['embedding_length','feed_forward_length','block_count','attention.head_count','attention.head_count_kv','attention.key_length']
-vals=[meta['qwen3.'+k] for k in keys]+[len(meta['tokenizer.ggml.tokens']),512]
+vals=[meta['qwen35.'+k] for k in keys]+[len(meta['tokenizer.ggml.tokens']),512]
+vals[2]-=meta.get('qwen35.nextn_predict_layers',1)
+assert vals==[1024,3584,24,8,2,256,248320,512]
 struct.pack_into('<8I',h,8,*vals)
-struct.pack_into('<2f',h,40,meta['qwen3.attention.layer_norm_rms_epsilon'],meta['qwen3.rope.freq_base'])
+struct.pack_into('<2f',h,40,meta['qwen35.attention.layer_norm_rms_epsilon'],meta['qwen35.rope.freq_base'])
 struct.pack_into('<IIIQ',h,48,nt,header_size,meta['tokenizer.ggml.eos_token_id'],cursor)
 records=[]
 with (out/'weights.bin').open('wb') as w:

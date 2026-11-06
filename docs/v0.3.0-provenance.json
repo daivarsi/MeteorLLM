@@ -1,0 +1,14 @@
+{
+  "model": "Qwen3.5-0.8B",
+  "repository": "ggml-org/Qwen3.5-0.8B-GGUF",
+  "revision": "807dfd9a6fadbf703207aac3bfb0b2b3040d077c",
+  "q8_file": "Qwen3.5-0.8B-Q8_0.gguf",
+  "q8_sha256": "37ae482d336108d23516fa35e8e0c4126688d81018b87178a18d752a1357814f",
+  "llama_cpp": "b12078 / 19e8a86fe",
+  "quantization": "--allow-requantize --pure --token-embedding-type q6_k input.gguf output.gguf Q4_K_S 3",
+  "pure_q4_gguf_sha256": "ed0b4a79b68560b60c671530bd46af487607e8f525b5c759f0557ea355a242a1",
+  "active_layers": 24,
+  "excluded": "MTP block 24",
+  "output": "Independent Q6_K embedding-row to Q4_K conversion using repack_output.cpp",
+  "license": "Apache-2.0 model; MIT ggml-derived kernels"
+}

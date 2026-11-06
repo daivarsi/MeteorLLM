@@ -5,3 +5,4 @@
 *.vpk
 *.log
 __pycache__/
+/Testing/

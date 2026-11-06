@@ -21,9 +21,11 @@
 #include <deque>
 #include <malloc.h>
 #include <utility>
+static int effective_clock(){return -1;}
+static void log_memory(const char*);
 
-int _newlib_heap_size_user=80*1024*1024;
-static const char* root="ux0:data/VitaDesk/MeteorLLM";
+int _newlib_heap_size_user=40*1024*1024;
+static const char* root="ux0:data/VitaDesk/MeteorLLM-08";
 static SceUID mutex_id=-1;
 static std::atomic<bool> stop_requested{false};
 struct Lock{Lock(){sceKernelLockMutex(mutex_id,1,nullptr);}~Lock(){sceKernelUnlockMutex(mutex_id,1);}};
@@ -43,6 +45,7 @@ static bool clear_requested=false;
 static uint64_t generation_started=0;
 static FILE* log_file=nullptr;
 static void log_text(const char*label,const std::string&value){if(log_file){std::fprintf(log_file,"%s %s\n",label,value.c_str());std::fflush(log_file);}}
+static void log_memory(const char*stage){SceKernelFreeMemorySizeInfo m{};m.size=sizeof(m);sceKernelGetFreeMemorySize(&m);log_text("UI_MEMORY",std::string(stage)+" free_user="+std::to_string(m.size_user)+" heap_used="+std::to_string(mallinfo().uordblks)+" cpu_plugin="+std::to_string(effective_clock()));}
 static int choose(const std::vector<float>&logits,std::mt19937&rng){
  std::vector<int>ids(logits.size());for(size_t i=0;i<ids.size();i++)ids[i]=int(i);
  std::partial_sort(ids.begin(),ids.begin()+20,ids.end(),[&](int a,int b){return logits[a]>logits[b];});ids.resize(20);
@@ -54,26 +57,20 @@ static int choose(const std::vector<float>&logits,std::mt19937&rng){
 static std::string read_request(){FILE*f=std::fopen((std::string(root)+"/request.txt").c_str(),"rb");if(!f)return {};char b[4097];size_t n=std::fread(b,1,4096,f);std::fclose(f);return std::string(b,n);}
 static int worker(SceSize,void*){
  try{
-  log_file=std::fopen((std::string(root)+"/run.log").c_str(),"w");log_text("APP","MeteorLLM Q6 lane trial");
+  log_file=std::fopen((std::string(root)+"/run.log").c_str(),"w");log_text("APP","MeteorLLM v0.3.0 Qwen3.5-0.8B Q4");
   uint64_t load_start=sceKernelGetProcessTimeWide();vitaqwen::Engine engine;vitaqwen::Tokenizer tokenizer;engine.load(root);tokenizer.load(std::string(root)+"/tokenizer.bin");engine.cancelled=[](){return bool(stop_requested);};
   if(FILE* full=std::fopen((std::string(root)+"/output-full.txt").c_str(),"r")){
    std::fclose(full);
    engine.fast_output=false;
   }
-  log_text("KERNEL_CHECK",std::to_string(engine.validate_quant_kernels())+" values; decode and dot products bit-exact against scalar");
-  FILE* diagnostic=std::fopen((std::string(root)+"/matrix-test.txt").c_str(),"r");
-  if(diagnostic){std::fclose(diagnostic);engine.benchmark_matrices([](const std::string&s){log_text("MATRIX_TEST",s);});log_text("MATRIX_TEST_DONE","passed");}
-  FILE* batch_diagnostic=std::fopen((std::string(root)+"/batch-test.txt").c_str(),"r");if(batch_diagnostic){std::fclose(batch_diagnostic);engine.validate_batch([](const std::string&s){log_text("BATCH_TEST",s);});log_text("BATCH_TEST_DONE","passed");}
-  FILE* attention_test=std::fopen((std::string(root)+"/attention-test.txt").c_str(),"r");if(attention_test){std::fclose(attention_test);engine.validate_extended([](const std::string&s){log_text("ATTENTION_CHECK",s);});log_text("ATTENTION_DONE","passed");}
-  int attention_mode=1;FILE* attention_config=std::fopen((std::string(root)+"/attention.txt").c_str(),"r");if(attention_config){if(std::fscanf(attention_config,"%d",&attention_mode)!=1)attention_mode=0;std::fclose(attention_config);}if(attention_mode<0||attention_mode>1)throw std::runtime_error("invalid attention mode");engine.set_parallel_attention(attention_mode!=0);log_text("PARALLEL_ATTENTION",std::to_string(attention_mode));
-  FILE* extended=std::fopen((std::string(root)+"/extended-test.txt").c_str(),"r");if(extended){std::fclose(extended);engine.benchmark_extended([](const std::string&s){log_text("EXTENDED_KERNEL",s);});engine.validate_extended([](const std::string&s){log_text("EXTENDED_CHECK",s);});engine.benchmark_output([](const std::string&s){log_text("OUTPUT_TEST",s);});log_text("EXTENDED_DONE","passed");}
-  int kernel_mode=2;FILE* kernel_config=std::fopen((std::string(root)+"/kernel.txt").c_str(),"r");if(kernel_config){if(std::fscanf(kernel_config,"%d",&kernel_mode)!=1)kernel_mode=0;std::fclose(kernel_config);}engine.set_batch_kernel(kernel_mode);log_text("BATCH_KERNEL",std::to_string(kernel_mode));
-  int output_rows=256;FILE* output_config=std::fopen((std::string(root)+"/output-rows.txt").c_str(),"r");if(output_config){if(std::fscanf(output_config,"%d",&output_rows)!=1)output_rows=64;std::fclose(output_config);}engine.set_output_rows(output_rows);log_text("OUTPUT_ROWS",std::to_string(output_rows));
-  int batch_size=8;FILE* batch_config=std::fopen((std::string(root)+"/batch.txt").c_str(),"r");if(batch_config){if(std::fscanf(batch_config,"%d",&batch_size)!=1)batch_size=1;std::fclose(batch_config);}if(batch_size<1||batch_size>16)throw std::runtime_error("invalid batch size");log_text("BATCH_SIZE",std::to_string(batch_size));
-  int matrix_workers=3;FILE* config=std::fopen((std::string(root)+"/workers.txt").c_str(),"r");if(config){if(std::fscanf(config,"%d",&matrix_workers)!=1)matrix_workers=1;std::fclose(config);}engine.set_workers(matrix_workers);log_text("WORKERS",std::to_string(matrix_workers));
+  log_text("KERNEL_CHECK",std::to_string(engine.validate_kernels())+" sampled row/lane outputs passed");
+  engine.set_workers(3);engine.set_output_rows(256);
+  const int batch_size=8;
+  bool benchmark=false;
+  if(FILE*f=std::fopen((std::string(root)+"/benchmark.txt").c_str(),"r")){std::fclose(f);benchmark=true;}
   SceKernelFreeMemorySizeInfo mem{};mem.size=sizeof(mem);sceKernelGetFreeMemorySize(&mem);
   log_text("MEMORY","heap_in_use="+std::to_string(mallinfo().uordblks)+" kv_bytes="+std::to_string(engine.kv_bytes()));
-  log_text("LOAD",std::to_string((sceKernelGetProcessTimeWide()-load_start)/1000)+" ms; resident="+std::to_string(engine.resident_bytes())+" free_user="+std::to_string(mem.size_user)+" cpu="+std::to_string(scePowerGetArmClockFrequency()));
+  log_text("LOAD",std::to_string((sceKernelGetProcessTimeWide()-load_start)/1000)+" ms; resident="+std::to_string(engine.resident_bytes())+" free_user="+std::to_string(mem.size_user)+" cpu_user_api="+std::to_string(scePowerGetArmClockFrequency())+" cpu_plugin="+std::to_string(effective_clock()));
   const std::string system="<|im_start|>system\nYou are a helpful assistant. Follow the instructions and answer concisely. If you do not know, say so.<|im_end|>\n";
   const auto prefix=tokenizer.encode(system+"<|im_start|>user\n");
   bool cache_prefix=true;
@@ -134,7 +131,7 @@ static int worker(SceSize,void*){
      question=input;
      answer.clear();
      ++transcript_revision;
-     limit=response_limits[response_mode];
+     limit=benchmark?8:response_limits[response_mode];
      stop_requested=false;
      phase=Reading;
      message="Reading your question";
@@ -184,6 +181,7 @@ static int worker(SceSize,void*){
      scores=&engine.forward_batch(std::vector<int>(ids.begin()+offset,ids.begin()+offset+n),pos,pos+n==prefill_end);
      offset+=n;
      pos+=n;
+     log_memory("prefill_batch");
      log_text("PREFILL","position="+std::to_string(pos)+" batch="+std::to_string(n)+" elapsed_us="+std::to_string(sceKernelGetProcessTimeWide()-start)+" "+engine.stage_metrics());
     }
     prefilled=true;
@@ -198,7 +196,7 @@ static int worker(SceSize,void*){
     for(;;){
      if(stop_requested){reason="Stopped";break;}
      int next=choose(*scores,rng);
-     if(next==engine.config().eos||next==151643){reason="End of turn";break;}
+     if(next==engine.config().eos||next==248044){reason="End of turn";break;}
      if(tokenizer.is_special(next)){reason="Unexpected chat marker";break;}
      std::string piece=tokenizer.decode(next);
      if(response.size()+piece.size()>response_byte_limit)break;
@@ -337,7 +335,7 @@ int main(){
    }else{
     touch_id=-1;
    }
-   if((pressed&SCE_CTRL_CROSS)&&state==Ready){SceImeDialogParam param;sceImeDialogParamInit(&param);param.supportedLanguages=SCE_IME_LANGUAGE_ENGLISH;param.type=SCE_IME_TYPE_BASIC_LATIN;param.title=title;param.maxTextLength=1024;param.initialText=empty;param.inputTextBuffer=input;param.dialogMode=SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;if(sceImeDialogInit(&param)>=0){ime=true;touch_id=-1;}}
+   if((pressed&SCE_CTRL_CROSS)&&state==Ready){SceImeDialogParam param;sceImeDialogParamInit(&param);param.supportedLanguages=SCE_IME_LANGUAGE_ENGLISH;param.type=SCE_IME_TYPE_BASIC_LATIN;param.title=title;param.maxTextLength=1024;param.initialText=empty;param.inputTextBuffer=input;param.dialogMode=SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;if(sceImeDialogInit(&param)>=0){ime=true;touch_id=-1;FILE*f=std::fopen((std::string(root)+"/ime-memory.log").c_str(),"w");if(f){SceKernelFreeMemorySizeInfo m{};m.size=sizeof(m);sceKernelGetFreeMemorySize(&m);std::fprintf(f,"IME_OPEN free_user=%u heap_used=%d\n",m.size_user,mallinfo().uordblks);std::fclose(f);}}}
   }else if(sceImeDialogGetStatus()==SCE_COMMON_DIALOG_STATUS_FINISHED){SceImeDialogResult result{};sceImeDialogGetResult(&result);sceImeDialogTerm();ime=false;if(result.button==SCE_IME_DIALOG_BUTTON_ENTER){std::string text=utf8(input);if(!text.empty()){Lock lock;pending=text;}}}
   vita2d_start_drawing();vita2d_clear_screen();
   // Native meteor mark: warm nucleus and three tapering trails.

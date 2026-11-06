@@ -1,0 +1,22 @@
+APP MeteorLLM v0.3.0 Qwen3.5-0.8B Q4
+KERNEL_CHECK 1488 sampled row/lane outputs passed
+MEMORY heap_in_use=35019872 kv_bytes=6291456
+LOAD 24959 ms; resident=281933312 free_user=5242880 cpu_user_api=333 cpu_plugin=-1
+PREFIX_INIT tokens=32 elapsed_us=31984975 heap_in_use=35020456
+PROMPT Mira is older than Soren. Soren is older than Tavi. Who is youngest? Answer with only the name.
+ENCODED 35 tokens; cached=32 start_position=32 elapsed_us=1538003
+UI_MEMORY prefill_batch free_user=5242880 heap_used=35023160 cpu_plugin=-1
+PREFILL position=40 batch=8 elapsed_us=5885121 matrix_us=4581227 recurrent_attention_us=1045306
+UI_MEMORY prefill_batch free_user=5242880 heap_used=35023168 cpu_plugin=-1
+PREFILL position=48 batch=8 elapsed_us=5926977 matrix_us=9161299 recurrent_attention_us=2133669
+UI_MEMORY prefill_batch free_user=5242880 heap_used=35023160 cpu_plugin=-1
+PREFILL position=56 batch=8 elapsed_us=5972636 matrix_us=13739486 recurrent_attention_us=3267901
+UI_MEMORY prefill_batch free_user=5242880 heap_used=35023160 cpu_plugin=-1
+PREFILL position=64 batch=8 elapsed_us=6004278 matrix_us=18310769 recurrent_attention_us=4442256
+UI_MEMORY prefill_batch free_user=5242880 heap_used=35023160 cpu_plugin=-1
+PREFILL position=67 batch=3 elapsed_us=4105392 matrix_us=21366587 recurrent_attention_us=4936115
+TOKEN 51
+TOKEN 5997
+ANSWER Tavi
+METRICS prompt_tokens=67 cached_tokens=32 generated=2 position=69 elapsed_us=34316661 prefill_us=29444854 decode_us=4871807 first_token_us=29462119 heap_in_use=35024048 kv_bytes=6291456 free_user=5242880 embedding_read_bytes=7612776 output_read_us=531659 output_compute_us=744039 output_full_scans=0 matrix_us=24805288 recurrent_attention_us=5322653
+STOP End of turn

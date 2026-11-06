@@ -1,0 +1,18 @@
+{
+  "weights.bin": {
+    "bytes": 281933312,
+    "sha256": "331de604ada9900dc59902108d33d19a2b9fcbbb0189e4616e810f09f3f7fc4f"
+  },
+  "embedding.bin": {
+    "bytes": 208588800,
+    "sha256": "2f613071cce1985c057351227e32b37662ea4e8be5eef284cce49d33e71d722f"
+  },
+  "output-q4-test.bin": {
+    "bytes": 143032320,
+    "sha256": "5b565ecf35910661ff0d09e7239b48aa9674c01dd2088ad207c004607cee6554"
+  },
+  "tokenizer.bin": {
+    "bytes": 6802056,
+    "sha256": "66710bccdc6b201132e1f69748fb6501edb8eb62326e6965ce76df3243c64f20"
+  }
+}

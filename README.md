@@ -1,61 +1,95 @@
 # MeteorLLM
 
-An experimental offline Qwen3-0.6B inference app for PlayStation Vita. It uses a C++20 engine, ARM NEON kernels, a rolling 512-token attention window, and a 56 MiB FP16 KV cache. The transformer weights stay resident while the output projection streams its weights from storage.
+An experimental, completely offline language-model app for PlayStation Vita. **v0.3.0 runs Qwen3.5-0.8B**, replacing v0.2.1's Qwen3-0.6B engine. It runs on the Vita itself; no server or internet connection is used for inference. This is the OverdriveLLM prototype integrated into MeteorLLM's existing chat UI.
 
-## Build and install
+[Download v0.3.0](https://github.com/daivarsi/MeteorLLM/releases/tag/v0.3.0)
 
-Install VitaSDK and libvita2d, and set VITASDK to the SDK directory. Run:
+## Install or update
 
-    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-    cmake --build build
+1. Download and install **MeteorLLM-v0.3.0.vpk**. It updates the existing **METEOR001** title.
+2. Download **MeteorLLM-Qwen35-0.8B-model.zip** from the same release.
+3. Extract its four model files (`weights.bin`, `embedding.bin`, `output-q4-test.bin`, `tokenizer.bin`) directly into **ux0:data/VitaDesk/MeteorLLM-08/**. Do not leave them inside an extra nested folder.
+4. Launch MeteorLLM and wait for model loading and shared-template preparation to finish.
 
-Install the resulting MeteorLLM.vpk on your Vita. The title ID is METEOR001. Prepare model files with Python 3:
+**The new model bundle is required. The old 0.6B files cannot be used with this engine.** Old files in `ux0:data/VitaDesk/MeteorLLM/` are left alone, so v0.2.1 can be reinstalled for rollback. The separate OverdriveLLM app is also left alone. The bundle uses about 611 MiB of storage when extracted; allow additional space for the download and temporary shared-template checkpoint. Model file hashes are in [the manifest](docs/v0.3.0-model-manifest.json), and release assets have SHA256SUMS.txt.
 
-    python export_model.py /path/to/Qwen3-0.6B-Q4_K_M.gguf model
-    python export_tokenizer.py
+The app does not set CPU clocks. The test device used an external overclock setup configured for 500 MHz, but effective clock was not independently verified in this release run. PSVshellPlus is not required to launch the app.
 
-Copy weights.bin, embedding.bin, and tokenizer.bin from model/ to ux0:data/VitaDesk/MeteorLLM/. Download MeteorLLM-Q4-output.zip from [v0.2.0](https://github.com/daivarsi/MeteorLLM/releases/tag/v0.2.0), extract output-q4-test.bin, and copy it to the same directory. This file is the optional Q4 output projection for the exact tested model below. Use the original projection for other model variants by omitting the Q4 file. The release does not bundle the resident model, input embeddings, or tokenizer. The exact tested Q4_K_M artifact was requantized from Qwen3-0.6B-Q8_0.gguf (Qwen revision 23749fefcc72300e3a2ad315e1317431b06b590a) using llama.cpp b12078 (19e8a86fe). Tested Q4_K_M SHA-256: 15e434d8ddf0af38fe3f7003af6ce6eac4edada6df34324aa45979f9cc79f02e.
+## Controls
 
-The host validation tools build separately with cmake -S host -B build-host and cmake --build build-host --config Release.
+- **X:** open the keyboard and ask a question.
+- **Triangle:** new chat.
+- **Circle:** stop prompt processing or generation.
+- **Square:** cycle 128 / 256 (default) / 512 / 1024 tokens / Until EOS (4096 maximum).
+- **Drag the conversation or hold Up/Down:** scroll the whole chat. At the bottom, new text is followed automatically.
 
-## Measured configuration
+## Actual Vita examples
 
-The release uses these defaults. Existing configuration files in the app data directory can override them:
+These are screenshots from the v0.3.0 device run, not rendered mockups.
 
-| File | Value |
-|---|---:|
-| workers.txt | 3 |
-| batch.txt | 8 |
-| kernel.txt | 2 |
-| attention.txt | 1 |
-| output-rows.txt | 256 |
+![Tavi prompt answered correctly on Vita](docs/images/Tavi-answer.png)
 
-On a physical Vita, these runs used the same 67-token formatted prompt and generated token IDs 51, 6190, and 13 (Tavi.), followed by EOS. Timing starts at prompt submission and ends at EOS. Model load is excluded.
+![Bat classification follow-up answered no](docs/images/Bats-answer.png)
 
-| Configuration | First token | Through EOS |
-| --- | ---: | ---: |
-| Earlier optimized build | 92.58 s | 136.38 s |
-| Rolling context, original kernels | 92.26 s | 134.30 s |
-| Int8 Q4 prefill and decode | 74.08 s | 112.06 s |
-| Int8 Q4/Q6 with Q4 output projection | 66.26 s | 92.03 s |
-| Vocabulary shortlist | 60.63 s | 69.57 s |
-| Tiled int8, template cache disabled | 57.98 s | 66.95 s |
-| Tiled int8, template ready | 32.71 s | 41.69 s |
-| v0.2.0 eight-token Q4 SIMD kernel, template ready | 30.07 s | 39.00 s |
-| v0.2.1, Vectorized Q4 unpacking and Q6 lane kernel, template ready | 28.18 s | 37.14 s |
+## Runtime
 
-The benchmark prompt was “Mira is older than Soren. Soren is older than Tavi. Who is youngest? Answer with only the name.” The warm run cached only the 32 fixed tokens before the question. The release benchmark prepared the cache in 22.72 seconds at startup and used about 3.5 MiB for it. Warm submission plus template preparation took 61.72 seconds, excluding model load. The previous tiled build took 66.95 seconds with caching disabled. The newest kernel was benchmarked with the template ready. The external overclock was configured for 500 MHz and the app's clock query reported 333 MHz. Effective frequency was not independently verified. The earlier completed single-worker fused build took 718.26 seconds on the same prompt. This benchmark covers one prompt, and the model can still fail simple arithmetic.
+Same Tavi question and system/chat template, with only the 32 fixed system/template tokens prepared in advance. All 35 remaining prompt tokens are processed normally. No user question or answer is precomputed. Normal conversation state is retained between turns.
 
-The Q4 projection and int8 activation paths are approximate. With the Q4 file present, the fast output mode scores about 25,000 tokens and checks the full vocabulary when the leading scores are close. The shortlist can omit better rare or multilingual tokens even when it looks confident. Create output-full.txt in the app data directory and restart to score the full vocabulary. Create prefix-cold.txt and restart to disable shared-template caching.
+| Build | First visible token | Through natural EOS | Answer |
+|---|---:|---:|---|
+| v0.2.1 Qwen3-0.6B, saved baseline | 28.18 s | 37.14 s | Tavi. |
+| Initial Qwen3.5-0.8B UI prototype | 41.74 s | 51.88 s | Tavi |
+| **v0.3.0 Qwen3.5-0.8B** | **29.46 s** | **34.32 s** | Tavi |
 
-Cross opens the keyboard, Triangle starts a new chat, and Circle cancels. Square cycles the response limit through 128, 256 (default), 512, 1024, and Until EOS. Drag the front touchscreen in the conversation area, or hold Up or Down, to scroll through the full chat. At the bottom, the view follows new text as it arrives.
+The new 0.8B run was **33.9% shorter** than the prior 0.8B UI run. It is close to the saved 0.6B runtime on this question, but these are separate single runs, not a controlled clock-matched model comparison. The 0.6B answer also contains an extra punctuation token. This does not establish general throughput or accuracy superiority.
+
+The 34.32 seconds includes 1.54 seconds restoring the shared template, and excludes startup: loading took 24.96 seconds, and preparing/writing the common template took 31.98 seconds. Longer inputs and responses take longer, sometimes much longer when output scoring falls back to the full vocabulary. See [the raw Tavi log](docs/v0.3.0-Tavi.txt) and [the second example](docs/v0.3.0-examples.txt).
+
+## Engine and tradeoffs
+
+The hybrid Qwen3.5 graph uses 18 gated-delta recurrent layers and six full-attention layers. MTP prediction weights are omitted. The build keeps MeteorLLM's int8 activation Q4 kernels, eight-token Cortex-A9 NEON tiles, three matrix workers, parallel attention, Q4 output projection, 256-row output reads, 512-token FP16 rolling attention KV and common-template reuse. Recurrent state remains FP32. It does not implement image inputs.
+
+Reducing the transformer's mixed Q4/Q6 weights to pure Q4 frees about 26.6 MiB. The engine uses that space and a smaller 40 MiB heap to keep **61,440 output-weight rows (33.75 MiB) in RAM**. Those cached rows are unchanged copies of model weights. Host checks show cached and streamed output scoring produce identical full logits. This is a weight cache, not a cache of test prompts or responses.
+
+Output scoring uses a general 65,536-token shortlist plus the special-token tail, with a full-vocabulary scan when the leading scores are close. This remains approximate and may omit better rare or multilingual tokens. To force full-vocabulary scoring, create `output-full.txt` in the new model directory and restart. Create `prefix-cold.txt` to disable shared-template reuse. Both can be substantially slower.
+
+Transformer storage is 268.87 MiB including its header; the combined transformer/output-cache allocation is about 302.62 MiB. The 40 MiB heap includes the 19.27 MiB recurrent state, 6 MiB attention KV, tokenizer and scratch. The tested UI, keyboard, Tavi and bat follow-up all fit with **5 MiB free user system RAM**. This is measured operation, not an exhaustive long-chat memory stress test.
+
+Quality is experimental: factual, arithmetic, grammar, translation and instruction-following mistakes remain possible. Final pure-Q4 smoke checks covered only Tavi, whales, bats and a short Spanish translation. The whale answer identified mammals correctly but added a less precise explanation. Earlier broader 0.8B tests used a different mixed Q4/Q6 model, so their scores should not be attributed to this final build. Quantization and output shortlisting can change answers. Full transcripts are in [the smoke-test file](docs/v0.3.0-host-smoke.jsonl).
+
+The attention ring retains 512 tokens; recurrent state can retain effects from earlier tokens. Eviction is not equivalent to rebuilding a fresh 512-token prompt. After cancellation, the app can replay recent token IDs to recover. The UI retains up to 128 completed turns / 128 KiB of completed text, plus the current turn. A shared-template checkpoint is regenerated each launch on disk to avoid duplicating the recurrent state in RAM.
+
+## Build and reproduce
+
+Requires VitaSDK and libvita2d. Set VITASDK and build:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+Host validation tools:
+
+```sh
+cmake -S host -B build-host -DCMAKE_BUILD_TYPE=Release
+cmake --build build-host
+cd build-host
+ctest --output-on-failure
+```
+
+`engine-check MODEL_DIRECTORY` checks batch/single-token parity, shared-prefix restoration, exact cached/streamed output equivalence and cancellation. `host-runner MODEL_DIRECTORY CASES.tsv OUTPUT.jsonl` runs greedy short cases; TSV fields are case ID, token limit and prompt. The app uses temperature .7 / top-p .8 / top-20 / seed 1234, so its sampled answers can differ from greedy host tests.
+
+The model was requantized from `ggml-org/Qwen3.5-0.8B-GGUF` revision `807dfd9a6fadbf703207aac3bfb0b2b3040d077c`, Q8_0 SHA-256 `37ae482d336108d23516fa35e8e0c4126688d81018b87178a18d752a1357814f`, using llama.cpp **b12078 / 19e8a86fe**:
+
+```sh
+llama-quantize --allow-requantize --pure --token-embedding-type q6_k Qwen3.5-0.8B-Q8_0.gguf Qwen3.5-0.8B-Q4_K-pure.gguf Q4_K_S 3
+python export_model.py Qwen3.5-0.8B-Q4_K-pure.gguf model
+python export_tokenizer.py
+build-host/repack-output model/embedding.bin model/output-q4-test.bin
+```
+
+The tested pure-Q4 GGUF SHA-256 is `ed0b4a79b68560b60c671530bd46af487607e8f525b5c759f0557ea355a242a1`. Exported resident weights, embeddings and tokenizer were regenerated and matched the bundled bytes. See [provenance](docs/v0.3.0-provenance.json) and [engine checks](docs/v0.3.0-engine-check.txt).
 
 ## Third-party notices
 
-The quantization layouts and decoding derive from ggml. See licenses/ for the upstream ggml and Qwen license texts.
-
-## Rolling context
-
-MeteorLLM carries its KV cache forward between turns. The last 512 tokens are available to attention, and RoPE continues at the absolute token position when the cache wraps. Evicted tokens leave the active window. Retained states may still reflect earlier attention to them, so rolling eviction and rebuilding a fresh 512-token prompt can produce different results. The app leaves CPU frequency control to the system or external overclock plugin.
-
-Until EOS stops at the model's end token or the safety ceiling of 4,096 generated tokens or 64 KiB of response text. Circle can stop either prefill or decode. After an interrupted inference pass, the next message can replay the most recent cached token IDs from position zero to recover cleanly. Triangle clears the conversation and the cache. The UI keeps up to 128 completed turns and 128 KiB of completed text, plus the current turn.
+The ggml-derived quantization kernels and reference graph use the pinned llama.cpp source; model weights are Apache-2.0. Exact upstream notices are retained under [licenses](licenses/).

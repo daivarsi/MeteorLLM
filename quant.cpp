@@ -231,7 +231,7 @@ void quantize_activation(const float* input,ActivationBlock* blocks,int count,in
 template<int Fixed> static void q4_activation_dot_tile(const void* weights,const ActivationBlock* input,float* out,int count,int width){
  const int batch=Fixed?Fixed:width;
  const auto* row=static_cast<const Q4*>(weights);
- float totals[16]={};
+ float totals[128]={};
  for(int b=0;b<count/256;b++){
   const float scale=half_to_float(row[b].d),bias=half_to_float(row[b].dmin);
   for(int group=0;group<8;group++){
@@ -279,7 +279,7 @@ void q4_activation_dot(const void* weights,const ActivationBlock* input,float* o
 template<int Fixed> static void q6_activation_dot_tile(const void* weights,const ActivationBlock* input,float* out,int count,int width){
  const int batch=Fixed?Fixed:width;
  const auto* row=static_cast<const Q6*>(weights);
- float totals[16]={};
+ float totals[128]={};
  for(int b=0;b<count/256;b++){
   const float scale=half_to_float(row[b].d);
   for(int half=0;half<2;half++)for(int group=0;group<4;group++){

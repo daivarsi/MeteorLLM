@@ -38,7 +38,7 @@ void Tokenizer::load(const std::string&path){
  FILE*f=std::fopen(path.c_str(),"rb");check(f,"tokenizer open failed");std::fseek(f,0,SEEK_END);long size=std::ftell(f);std::rewind(f);
  if(size<64||size>16*1024*1024){std::fclose(f);throw std::runtime_error("tokenizer size bounds");}data.resize(size);size_t got=std::fread(data.data(),1,size,f);std::fclose(f);check(got==size_t(size)&&!std::memcmp(data.data(),"MTOK0001",8),"tokenizer header/read");
  uint32_t*fields[]={&count,&merge_count,&special_count,&offset_base,&blob_base,&blob_size,&byte_base,&special_base,&merge_base};for(int i=0;i<9;i++)*fields[i]=read32(data.data()+8+4*i);
- check(count>256&&count<=200000&&merge_count<=300000&&special_count<=1024,"tokenizer counts");
+ check(count>256&&count<=300000&&merge_count<=300000&&special_count<=1024,"tokenizer counts");
  check(read32(data.data()+44)==uint32_t(size)&&read32(data.data()+48)==0&&offset_base==64&&blob_base==offset_base+4*(count+1),"tokenizer offsets");
  check(uint64_t(blob_base)+blob_size<=uint64_t(size)&&byte_base>=blob_base+blob_size&&byte_base-(blob_base+blob_size)<4&&special_base==byte_base+1024&&uint64_t(special_base)+special_count*4<=uint64_t(size),"tokenizer blob bounds");
  check(merge_base>=special_base+special_count*4&&merge_base-(special_base+special_count*4)<8&&uint64_t(merge_base)+uint64_t(merge_count)*16==uint64_t(size),"merge table bounds");
