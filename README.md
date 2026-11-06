@@ -4,6 +4,17 @@ An experimental, completely offline language-model app for PlayStation Vita. **v
 
 [Download v0.3.0](https://github.com/daivarsi/MeteorLLM/releases/tag/v0.3.0)
 
+The updated v0.3.0 VPK includes a device-tested four-core path:
+**30.69–30.70 seconds** on short Tavi versus **34.45–34.54 seconds** with three
+workers in matched 444 MHz tests. Only the fixed 32-token template was cached;
+all answer logits matched exactly. It bundles MIT-licensed CapUnlocker for
+runtime loading, with a three-worker fallback and no boot configuration edits.
+See [the experiment report](docs/plugin-tests-2026-11-06.md) and
+[plugin details](plugins/README.md). Existing 0.8B users only need to reinstall
+the updated VPK; the model files are unchanged. The release includes a matching
+`MeteorLLM-v0.3.0-four-core-source.zip`; GitHub's automatic v0.3.0 source archives
+still describe the original tag.
+
 ## Install or update
 
 1. Download and install **MeteorLLM-v0.3.0.vpk**. It updates the existing **METEOR001** title.
@@ -13,7 +24,7 @@ An experimental, completely offline language-model app for PlayStation Vita. **v
 
 **The new model bundle is required. The old 0.6B files cannot be used with this engine.** Old files in `ux0:data/VitaDesk/MeteorLLM/` are left alone, so v0.2.1 can be reinstalled for rollback. The separate OverdriveLLM app is also left alone. The bundle uses about 611 MiB of storage when extracted; allow additional space for the download and temporary shared-template checkpoint. Model file hashes are in [the manifest](docs/v0.3.0-model-manifest.json), and release assets have SHA256SUMS.txt.
 
-The app does not set CPU clocks. The test device used an external overclock setup configured for 500 MHz, but effective clock was not independently verified in this release run. PSVshellPlus is not required to launch the app.
+The app does not set CPU clocks. The four-core comparison reported 444 MHz from PSVshellPlus throughout the matched runs. Earlier release measurements did not independently verify their effective clock. PSVshellPlus is not required to launch the app.
 
 ## Controls
 
@@ -47,7 +58,7 @@ The 34.32 seconds includes 1.54 seconds restoring the shared template, and exclu
 
 ## Engine and tradeoffs
 
-The hybrid Qwen3.5 graph uses 18 gated-delta recurrent layers and six full-attention layers. MTP prediction weights are omitted. The build keeps MeteorLLM's int8 activation Q4 kernels, eight-token Cortex-A9 NEON tiles, three matrix workers, parallel attention, Q4 output projection, 256-row output reads, 512-token FP16 rolling attention KV and common-template reuse. Recurrent state remains FP32. It does not implement image inputs.
+The hybrid Qwen3.5 graph uses 18 gated-delta recurrent layers and six full-attention layers. MTP prediction weights are omitted. The build keeps MeteorLLM's int8 activation Q4 kernels, eight-token Cortex-A9 NEON tiles, parallel attention, Q4 output projection, 256-row output reads, 512-token FP16 rolling attention KV and common-template reuse. The updated VPK uses four matrix/attention workers when available, falling back to the original three. Recurrent state remains FP32. It does not implement image inputs.
 
 Reducing the transformer's mixed Q4/Q6 weights to pure Q4 frees about 26.6 MiB. The engine uses that space and a smaller 40 MiB heap to keep **61,440 output-weight rows (33.75 MiB) in RAM**. Those cached rows are unchanged copies of model weights. Host checks show cached and streamed output scoring produce identical full logits. This is a weight cache, not a cache of test prompts or responses.
 
@@ -92,4 +103,4 @@ The tested pure-Q4 GGUF SHA-256 is `ed0b4a79b68560b60c671530bd46af487607e8f525b5
 
 ## Third-party notices
 
-The ggml-derived quantization kernels and reference graph use the pinned llama.cpp source; model weights are Apache-2.0. Exact upstream notices are retained under [licenses](licenses/).
+The ggml-derived quantization kernels and reference graph use the pinned llama.cpp source; model weights are Apache-2.0. CapUnlocker is MIT-licensed, copyright GrapheneCt. Exact upstream notices are retained under [licenses](licenses/).

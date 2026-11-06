@@ -7,6 +7,7 @@
 #include <psp2/ime_dialog.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/power.h>
 #include <psp2/sysmodule.h>
@@ -45,6 +46,24 @@ static bool clear_requested=false;
 static uint64_t generation_started=0;
 static FILE* log_file=nullptr;
 static void log_text(const char*label,const std::string&value){if(log_file){std::fprintf(log_file,"%s %s\n",label,value.c_str());std::fflush(log_file);}}
+struct TaiModuleArgs{size_t size;SceUID pid;size_t args;void*argp;int flags;};
+extern "C" SceUID taiLoadStartKernelModuleForUser(const char*,TaiModuleArgs*);
+static int core_probe(SceSize,void*){return 0;}
+static bool fourth_core_available(){
+ const int id=sceKernelCreateThread("meteor_core_probe",core_probe,0x10000100,4096,0,SCE_KERNEL_CPU_MASK_SYSTEM,nullptr);
+ if(id<0)return false;
+ sceKernelDeleteThread(id);return true;
+}
+static int select_workers(){
+ if(FILE*f=std::fopen((std::string(root)+"/three-core.txt").c_str(),"r")){std::fclose(f);log_text("CPU_WORKERS","3 forced");return 3;}
+ if(!fourth_core_available()){
+  TaiModuleArgs args{};args.size=sizeof(args);args.pid=0x10005;
+  const int rc=taiLoadStartKernelModuleForUser("ux0:app/METEOR001/plugins/CapUnlocker.skprx",&args);
+  char result[32];std::snprintf(result,sizeof(result),"load_rc=%08x",unsigned(rc));log_text("CAPUNLOCKER",result);
+ }
+ const int count=fourth_core_available()?4:3;
+ log_text("CPU_WORKERS",std::to_string(count));return count;
+}
 static void log_memory(const char*stage){SceKernelFreeMemorySizeInfo m{};m.size=sizeof(m);sceKernelGetFreeMemorySize(&m);log_text("UI_MEMORY",std::string(stage)+" free_user="+std::to_string(m.size_user)+" heap_used="+std::to_string(mallinfo().uordblks)+" cpu_plugin="+std::to_string(effective_clock()));}
 static int choose(const std::vector<float>&logits,std::mt19937&rng){
  std::vector<int>ids(logits.size());for(size_t i=0;i<ids.size();i++)ids[i]=int(i);
@@ -64,7 +83,7 @@ static int worker(SceSize,void*){
    engine.fast_output=false;
   }
   log_text("KERNEL_CHECK",std::to_string(engine.validate_kernels())+" sampled row/lane outputs passed");
-  engine.set_workers(3);engine.set_output_rows(256);
+  engine.set_workers(select_workers());engine.set_output_rows(256);
   const int batch_size=8;
   bool benchmark=false;
   if(FILE*f=std::fopen((std::string(root)+"/benchmark.txt").c_str(),"r")){std::fclose(f);benchmark=true;}

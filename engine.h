@@ -46,7 +46,7 @@ private:
  std::string directory;uint8_t*model=nullptr;uint64_t model_bytes=0;int mem_uid=-1;FILE*emb_file=nullptr,*head_file=nullptr;
  std::vector<Tensor>tensors;Tensor emb{};std::vector<float>state,conv,logits;std::vector<uint16_t>keys,values;
  uint8_t*head_cache=nullptr;static constexpr int cached_rows=61440;
- std::vector<uint8_t>io;std::vector<float>scratch[3];
+ std::vector<uint8_t>io;std::vector<float>scratch[4];
  const Tensor&tensor(const std::string&)const;void norm(float*,const float*,const Tensor&,int);
  void matrix(const Tensor&,State*,int,std::vector<float>State::*,std::vector<float>State::*);
  void embedding(int,float*);void output_head(const float*);void linear(State&,int);void attend(State&,int,int);
